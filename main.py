@@ -14,7 +14,7 @@ from signals import SignalConfig, build_signals
 
 # ========= USER CONFIG (edit here) =========
 TICKER = "^GSPC"         # e.g., "^GSPC", "NVDA", "AAPL", "AMD"
-START  = "2010-01-01"    # start date for historical data
+START  = "2018-01-01"    # start date for historical data
 PROFILE = "aggressive"     # "conservative" | "moderate" | "aggressive"
 # ==========================================
 
@@ -31,18 +31,30 @@ def load_prices_yf(ticker: str, start: str = "2005-01-01") -> pd.Series:
     df = yf.download(ticker, start=start, progress=False, auto_adjust=False)
     if df.empty:
         raise ValueError(f"No data returned for ticker '{ticker}'.")
+    
+    # Handle MultiIndex columns (yfinance sometimes returns them)
+    if isinstance(df.columns, pd.MultiIndex):
+        # Flatten MultiIndex columns
+        df.columns = df.columns.get_level_values(0)
+    
     df.index.name = "Date"
 
     # prefer Adj Close; fallback to Close
     col = "Adj Close" if "Adj Close" in df.columns else "Close"
     s = df[col].copy()
     s.name = "Adj Close"   # set the Series name directly (no .rename("..."))
+    
+    # Ensure index is a simple DatetimeIndex
+    if isinstance(s.index, pd.MultiIndex):
+        s.index = s.index.get_level_values(0)
+    
     return s
 
 def _strategy_returns(sig: pd.DataFrame) -> pd.Series:
-    """Daily strategy returns using long-only position with 1-day lag on execution."""
+    """Daily strategy returns using long/short positions with 1-day lag on execution."""
     asset_ret = sig["returns"].fillna(0.0)
     pos = sig["position"].shift(1).fillna(0).astype(float)
+    # Position: +1 (compra), -1 (venda), 0 (neutro)
     strat_ret = (asset_ret * pos).rename("strategy_ret")
     return strat_ret
 
@@ -95,10 +107,21 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     sharpe = (strat_ret.mean() / strat_ret.std()) * np.sqrt(252) if strat_ret.std() > 0 else np.nan
     hit = _hit_rate(strat_ret, sig["returns"])
 
+    # Count trades
+    buy_entries = int((sig['position'].diff() == 1).sum())
+    sell_entries = int((sig['position'].diff() == -1).sum())
+    total_trades = buy_entries + sell_entries
+    
+    # Position statistics
+    days_long = int((sig['position'] == 1).sum())
+    days_short = int((sig['position'] == -1).sum())
+    days_neutral = int((sig['position'] == 0).sum())
+    
     print("\n=== STRATEGY METRICS ===")
     print(f"Ticker             : {ticker}")
     print(f"Profile            : {cfg.profile}")
-    print(f"Trades (entries)   : {int((sig['position'].diff() == 1).sum())}")
+    print(f"Total Trades       : {total_trades} (Compras: {buy_entries}, Vendas: {sell_entries})")
+    print(f"Days in Position   : Long={days_long}, Short={days_short}, Neutral={days_neutral}")
     print(f"Total Return       : {total_return: .2%}")
     print(f"CAGR (approx)      : {cagr: .2%}")
     print(f"Asset Vol (ann)    : {vol_ann: .2%}")
@@ -106,15 +129,72 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     print(f"Sharpe (no RF)     : {sharpe: .2f}")
     print(f"Hit Rate           : {hit: .2%}")
 
-    # 1️⃣ PRICE + EMAs + POSITION
-    plt.figure(figsize=(10, 5))
-    plt.plot(sig.index, sig["price"], label="Price", lw=1.2)
-    plt.plot(sig.index, sig[f"ema{cfg.ema_fast}"], label=f"EMA {cfg.ema_fast}")
-    plt.plot(sig.index, sig[f"ema{cfg.ema_slow}"], label=f"EMA {cfg.ema_slow}")
-    plt.fill_between(sig.index, sig["price"].min(), sig["price"].max(),
-                     where=sig["position"].astype(bool), color="green", alpha=0.1, label="Position=1")
-    plt.title(f"{ticker} — Price & EMAs (position shaded)")
-    plt.legend()
+    # 1️⃣ PRICE + EMAs + POSITION (com marcadores de entrada/saída)
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    # Plot price and EMAs
+    ax.plot(sig.index, sig["price"], label="Price", lw=1.5, color="black", zorder=5)
+    ax.plot(sig.index, sig[f"ema{cfg.ema_fast}"], label=f"EMA {cfg.ema_fast}", lw=1.2, alpha=0.8)
+    ax.plot(sig.index, sig[f"ema{cfg.ema_slow}"], label=f"EMA {cfg.ema_slow}", lw=1.2, alpha=0.8)
+    
+    # Shade long positions (green) and short positions (red)
+    long_mask = sig["position"] == 1
+    short_mask = sig["position"] == -1
+    ax.fill_between(sig.index, sig["price"].min(), sig["price"].max(),
+                    where=long_mask, color="green", alpha=0.12, label="Long Position", zorder=1)
+    ax.fill_between(sig.index, sig["price"].min(), sig["price"].max(),
+                    where=short_mask, color="red", alpha=0.12, label="Short Position", zorder=1)
+    
+    # Detect entry and exit points
+    position_diff = sig["position"].diff()
+    prev_position = sig["position"].shift(1).fillna(0).astype(int)
+    
+    # Buy entries: position changes TO 1 (from 0 or -1)
+    # Only count if previous position was not 1
+    buy_entries_mask = (position_diff == 1) & (prev_position != 1)
+    buy_entries_idx = buy_entries_mask[buy_entries_mask].index
+    if len(buy_entries_idx) > 0:
+        buy_entry_prices = sig.loc[buy_entries_idx, "price"]
+        ax.scatter(buy_entries_idx, buy_entry_prices, marker="^", color="lime", 
+                  s=120, zorder=15, label=f"Buy Entry ({len(buy_entries_idx)})", 
+                  edgecolors="darkgreen", linewidths=2, alpha=0.9)
+    
+    # Sell entries: position changes TO -1 (from 0 or 1)
+    # Only count if previous position was not -1
+    sell_entries_mask = (position_diff == -1) & (prev_position != -1)
+    sell_entries_idx = sell_entries_mask[sell_entries_mask].index
+    if len(sell_entries_idx) > 0:
+        sell_entry_prices = sig.loc[sell_entries_idx, "price"]
+        ax.scatter(sell_entries_idx, sell_entry_prices, marker="v", color="red", 
+                  s=120, zorder=15, label=f"Sell Entry ({len(sell_entries_idx)})", 
+                  edgecolors="darkred", linewidths=2, alpha=0.9)
+    
+    # Long exits: position was 1, now is 0 or -1
+    long_exits_mask = (prev_position == 1) & (sig["position"] != 1)
+    long_exits_idx = long_exits_mask[long_exits_mask].index
+    if len(long_exits_idx) > 0:
+        long_exit_prices = sig.loc[long_exits_idx, "price"]
+        ax.scatter(long_exits_idx, long_exit_prices, marker="X", color="orange", 
+                  s=100, zorder=15, label=f"Long Exit ({len(long_exits_idx)})", 
+                  edgecolors="darkorange", linewidths=1.5, alpha=0.85)
+    
+    # Short exits: position was -1, now is 0 or 1
+    short_exits_mask = (prev_position == -1) & (sig["position"] != -1)
+    short_exits_idx = short_exits_mask[short_exits_mask].index
+    if len(short_exits_idx) > 0:
+        short_exit_prices = sig.loc[short_exits_idx, "price"]
+        ax.scatter(short_exits_idx, short_exit_prices, marker="X", color="orange", 
+                  s=100, zorder=15, label=f"Short Exit ({len(short_exits_idx)})", 
+                  edgecolors="darkorange", linewidths=1.5, alpha=0.85)
+    
+    ax.set_title(f"{ticker} — Price & EMAs with Trading Signals\n"
+                f"Green Background=Long | Red Background=Short | "
+                f"↑Buy Entry (lime) | ↓Sell Entry (red) | ✗ Exit (orange)", 
+                fontsize=11, pad=10)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, alpha=0.3, linestyle="--")
     plt.tight_layout()
     plt.show()
 
@@ -124,18 +204,37 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.plot(sig.index, sig["heston_vol"], label="Heston Vol")
     plt.plot(sig.index, sig["vol_pred_cons"], label="Consensus Vol")
     vol_hist_col = [c for c in sig.columns if c.startswith("vol_hist_")][0]
-    plt.plot(sig.index, sig[vol_hist_col], label="Realized Vol (7d)")
+    plt.plot(sig.index, sig[vol_hist_col], label="Benchmark Vol (MA7 de Vol21d)")
     plt.title(f"{ticker} — Predicted vs Realized Volatility")
     plt.legend()
     plt.tight_layout()
     plt.show()
 
     # 3️⃣ Z-SCORE
-    plt.figure(figsize=(10, 4))
-    plt.plot(sig.index, sig["zscore"], label="Z-Score")
-    plt.axhline(cfg.z_thresholds[cfg.profile], color="r", linestyle="--", label="Threshold")
+    plt.figure(figsize=(12, 5))
+    plt.plot(sig.index, sig["zscore"], label="Z-Score", color="blue", lw=1.2)
+    
+    # Show buy and sell thresholds
+    z_thresh = cfg.z_thresholds[cfg.profile]
+    buy_thresh = z_thresh["buy"]
+    sell_thresh = z_thresh["sell"]
+    
+    plt.axhline(buy_thresh, color="green", linestyle="--", linewidth=1.5, 
+                label=f"Buy Threshold ({buy_thresh:.1f})")
+    plt.axhline(sell_thresh, color="red", linestyle="--", linewidth=1.5, 
+                label=f"Sell Threshold ({sell_thresh:.1f})")
+    plt.axhline(0, color="gray", linestyle="-", linewidth=0.5, alpha=0.5)
+    
+    # Shade regions
+    plt.fill_between(sig.index, sig["zscore"].min(), buy_thresh, 
+                     where=(sig["zscore"] < buy_thresh), alpha=0.1, color="green", label="Calmaria (Buy Zone)")
+    plt.fill_between(sig.index, sell_thresh, sig["zscore"].max(), 
+                     where=(sig["zscore"] > sell_thresh), alpha=0.1, color="red", label="Risco (Sell Zone)")
+    
     plt.title(f"{ticker} — Z-Score ({cfg.profile} profile)")
-    plt.legend()
+    plt.ylabel("Z-Score")
+    plt.legend(loc="best")
+    plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
@@ -156,25 +255,53 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.show()
 
 def run() -> None:
+    print("=" * 60)
+    print("META-ESTRATÉGIA DE TRADING - ANÁLISE DE VOLATILIDADE")
+    print("=" * 60)
+    print(f"Ativo: {TICKER}")
+    print(f"Período: {START} até hoje")
+    print(f"Perfil: {PROFILE}")
+    print("=" * 60)
+    
     # 1) Load prices from Yahoo Finance
+    print(f"\n[1/5] Carregando dados de preços para {TICKER}...")
     prices = load_prices_yf(TICKER, start=START)
+    print(f"  ✓ {len(prices)} dias de dados carregados")
 
     # 2) Returns
+    print(f"\n[2/5] Calculando retornos diários...")
     returns = prices.pct_change().dropna()
+    print(f"  ✓ {len(returns)} retornos calculados")
 
     # 3) Volatility estimates (daily, same index/scale)
-    heston_vol = estimate_heston_vol(returns, window=7)
-    garch_vol  = estimate_garch_vol(returns, variant="GARCH")
+    print(f"\n[3/5] Estimando volatilidade com modelos Heston e GARCH...")
+    print("  → Heston (Monte Carlo)...")
+    heston_vol = estimate_heston_vol(returns, ticker=TICKER, verbose=True)
+    print(f"  ✓ Heston: {len(heston_vol.dropna())} previsões válidas")
+    
+    print("  → GARCH...")
+    garch_vol = estimate_garch_vol(returns, variant="GARCH")
+    print(f"  ✓ GARCH: {len(garch_vol.dropna())} previsões válidas")
 
     # Align indices
+    print(f"\n[4/5] Alinhando índices e calculando consenso...")
     idx = prices.index.intersection(heston_vol.index).intersection(garch_vol.index)
     prices     = prices.reindex(idx)
     heston_vol = heston_vol.reindex(idx)
     garch_vol  = garch_vol.reindex(idx)
+    
+    # Show consensus calculation
+    consensus_vol = (heston_vol + garch_vol) / 2.0
+    print(f"  ✓ Consenso de Volatilidade = (Heston + GARCH) / 2")
+    print(f"    Média Heston: {heston_vol.mean():.6f}")
+    print(f"    Média GARCH:  {garch_vol.mean():.6f}")
+    print(f"    Média Consenso: {consensus_vol.mean():.6f}")
 
     # 4) Build signals (Slides 4→9)
+    print(f"\n[5/5] Construindo sinais de trading...")
     cfg = SignalConfig(profile=PROFILE)
     sig = build_signals(prices, garch_vol, heston_vol, cfg=cfg)
+    print(f"  ✓ {len(sig)} sinais gerados")
 
     # 5) Save output
     outdir = Path("outputs")
@@ -183,16 +310,48 @@ def run() -> None:
     sig.to_csv(out_csv, index=True)
 
     # 6) Quick summary
-    print("\n=== Meta-Strategy Signals ===")
-    print(f"Source     : Ticker: {TICKER} (start={START})")
-    print(f"Profile    : {PROFILE}")
-    print(f"Rows       : {len(sig)}")
-    print(f"Output CSV : {out_csv}")
-    print("\nTail:")
-    cols = ["price", "garch_vol", "heston_vol", "zscore", "risk_state", "agree_flag", "position"]
-    print(sig[cols].tail(10))
+    print("\n" + "=" * 60)
+    print("RESUMO DOS SINAIS")
+    print("=" * 60)
+    print(f"Ativo: {TICKER}")
+    print(f"Período: {START} até {sig.index[-1].strftime('%Y-%m-%d')}")
+    print(f"Total de dias: {len(sig)}")
+    z_thresh = cfg.z_thresholds[PROFILE]
+    print(f"Perfil: {PROFILE} (Buy: {z_thresh['buy']:.1f}, Sell: {z_thresh['sell']:.1f})")
+    print(f"\nEstatísticas de Volatilidade:")
+    print(f"  Heston (média): {sig['heston_vol'].mean():.6f}")
+    print(f"  GARCH (média):  {sig['garch_vol'].mean():.6f}")
+    print(f"  Consenso (média): {sig['vol_pred_cons'].mean():.6f}")
+    vol_hist_col = [c for c in sig.columns if c.startswith("vol_hist_")][0]
+    print(f"  Histórica (média): {sig[vol_hist_col].mean():.6f}")
+    print(f"\nZ-Score:")
+    print(f"  Média: {sig['zscore'].mean():.2f}")
+    print(f"  Std:   {sig['zscore'].std():.2f}")
+    print(f"  Min:   {sig['zscore'].min():.2f}")
+    print(f"  Max:   {sig['zscore'].max():.2f}")
+    print(f"\nPosições:")
+    buy_entries = int((sig['position'].diff() == 1).sum())
+    sell_entries = int((sig['position'].diff() == -1).sum())
+    days_long = int((sig['position'] == 1).sum())
+    days_short = int((sig['position'] == -1).sum())
+    print(f"  Entradas de COMPRA: {buy_entries}")
+    print(f"  Entradas de VENDA: {sell_entries}")
+    print(f"  Dias em LONG: {days_long} ({days_long/len(sig)*100:.1f}%)")
+    print(f"  Dias em SHORT: {days_short} ({days_short/len(sig)*100:.1f}%)")
+    print(f"  Dias NEUTRO: {len(sig) - days_long - days_short} ({(len(sig) - days_long - days_short)/len(sig)*100:.1f}%)")
+    print(f"\nArquivo salvo: {out_csv}")
+    print("=" * 60)
+    
+    print("\nÚltimas 10 linhas:")
+    cols = ["price", "garch_vol", "heston_vol", "vol_pred_cons", vol_hist_col, "zscore", "risk_state", 
+            "ema_fast_slope", "ema_fast_strong_up", "ema_fast_strong_down",
+            "buy_gate", "sell_gate", "buy_signal", "sell_signal", "position"]
+    print(sig[cols].tail(10).to_string())
 
-    #7) Visualization & metrics
+    # 7) Visualization & metrics
+    print("\n" + "=" * 60)
+    print("Gerando visualizações e métricas...")
+    print("=" * 60)
     visualize(sig, cfg, TICKER)
     
 if __name__ == "__main__":
