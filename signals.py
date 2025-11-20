@@ -354,3 +354,103 @@ def build_signals(
     df["position"] = df["position"].astype(int)
 
     return df
+
+
+def build_ema_only_signals(prices: pd.Series, ema_fast: int = 7, ema_slow: int = 21) -> pd.DataFrame:
+    """
+    Estratégia simples baseada APENAS em cruzamento de médias móveis exponenciais.
+    Usado para comparar com a meta-estratégia que usa modelo de volatilidade.
+    
+    Regras:
+    - Entrada LONG: quando EMA_fast cruza acima de EMA_slow (trend_up)
+    - Entrada SHORT: quando EMA_fast cruza abaixo de EMA_slow (trend_down)
+    - Saída: quando o cruzamento inverte (trend_up vira trend_down ou vice-versa)
+    
+    Args:
+        prices: Série de preços
+        ema_fast: Período da EMA rápida (padrão: 7)
+        ema_slow: Período da EMA lenta (padrão: 21)
+    
+    Returns:
+        DataFrame com preços, retornos, EMAs, sinais e posições
+    """
+    idx = prices.index
+    p = prices.copy()
+    p.name = "price"
+    
+    # Retornos
+    ret = p.pct_change().dropna()
+    ret.name = "returns"
+    
+    # Alinhar índices
+    idx, (p, ret) = _align_series(p, ret)
+    
+    # Calcular EMAs
+    ema_fast_series = _ema(p, span=ema_fast)
+    ema_fast_series.name = f"ema{ema_fast}"
+    ema_slow_series = _ema(p, span=ema_slow)
+    ema_slow_series.name = f"ema{ema_slow}"
+    
+    # Tendência: EMA rápida vs EMA lenta
+    trend_up = (ema_fast_series > ema_slow_series)
+    trend_up.name = "trend_up"
+    trend_down = (ema_fast_series < ema_slow_series)
+    trend_down.name = "trend_down"
+    
+    # Sinais de entrada baseados em cruzamento
+    # Entrada LONG: quando trend_up se torna True (cruzamento para cima)
+    # Entrada SHORT: quando trend_down se torna True (cruzamento para baixo)
+    trend_up_prev = trend_up.shift(1).fillna(False)
+    trend_down_prev = trend_down.shift(1).fillna(False)
+    
+    # Buy signal: cruzamento para cima (trend_up novo)
+    buy_signal = trend_up & (~trend_up_prev)
+    buy_signal.name = "buy_signal"
+    
+    # Sell signal: cruzamento para baixo (trend_down novo)
+    sell_signal = trend_down & (~trend_down_prev)
+    sell_signal.name = "sell_signal"
+    
+    # Lógica de posição (swing trade)
+    position = pd.Series(0, index=idx, dtype=int, name="position")
+    
+    for i in range(1, len(idx)):
+        prev_pos = position.iat[i - 1]
+        
+        if prev_pos == 1:  # Em posição de COMPRA
+            # Mantém compra enquanto trend_up, fecha se trend_down
+            position.iat[i] = 1 if trend_up.iat[i] else 0
+        elif prev_pos == -1:  # Em posição de VENDA
+            # Mantém venda enquanto trend_down, fecha se trend_up
+            position.iat[i] = -1 if trend_down.iat[i] else 0
+        else:  # Neutro (0)
+            # Entra em compra ou venda baseado nos sinais de cruzamento
+            if buy_signal.iat[i]:
+                position.iat[i] = 1
+            elif sell_signal.iat[i]:
+                position.iat[i] = -1
+            else:
+                position.iat[i] = 0
+    
+    # Assemble DataFrame
+    df = pd.concat(
+        [
+            p,
+            ret,
+            ema_fast_series,
+            ema_slow_series,
+            trend_up,
+            trend_down,
+            buy_signal,
+            sell_signal,
+            position,
+        ],
+        axis=1,
+    )
+    
+    # Warm-up: disable early positions (onde não há dados suficientes para EMAs)
+    warmup_mask = ema_fast_series.isna() | ema_slow_series.isna()
+    df.loc[warmup_mask, "position"] = 0
+    df["position"] = df["position"].astype(int)
+    
+    return df

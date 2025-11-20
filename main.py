@@ -9,13 +9,13 @@ import matplotlib.pyplot as plt
 # local modules (root-level)
 from model_heston import estimate_heston_vol
 from model_garch import estimate_garch_vol
-from signals import SignalConfig, build_signals
+from signals import SignalConfig, build_signals, build_ema_only_signals
 
 
 # ========= USER CONFIG (edit here) =========
 TICKER = "^GSPC"         # e.g., "^GSPC", "NVDA", "AAPL", "AMD"
 START  = "2018-01-01"    # start date for historical data
-PROFILE = "aggressive"     # "conservative" | "moderate" | "aggressive"
+PROFILE = "moderate"     # "conservative" | "moderate" | "aggressive"
 # ==========================================
 
 
@@ -254,6 +254,120 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.tight_layout()
     plt.show()
 
+
+def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg, ticker: str) -> None:
+    """
+    Compara a meta-estratégia (com modelo de volatilidade) vs estratégia apenas com EMAs.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Calcular retornos e equity para ambas estratégias
+    strat_ret_meta = _strategy_returns(sig_meta)
+    equity_meta = _equity_curve(strat_ret_meta)
+    dd_meta = _drawdown(equity_meta)
+    
+    strat_ret_ema = _strategy_returns(sig_ema)
+    equity_ema = _equity_curve(strat_ret_ema)
+    dd_ema = _drawdown(equity_ema)
+    
+    # Alinhar índices
+    idx_common = equity_meta.index.intersection(equity_ema.index)
+    equity_meta = equity_meta.reindex(idx_common)
+    equity_ema = equity_ema.reindex(idx_common)
+    dd_meta = dd_meta.reindex(idx_common)
+    dd_ema = dd_ema.reindex(idx_common)
+    
+    # Métricas para comparação
+    total_return_meta = equity_meta.iloc[-1] - 1.0
+    total_return_ema = equity_ema.iloc[-1] - 1.0
+    cagr_meta = (equity_meta.iloc[-1] ** (252 / max(1, len(idx_common)))) - 1.0
+    cagr_ema = (equity_ema.iloc[-1] ** (252 / max(1, len(idx_common)))) - 1.0
+    sharpe_meta = (strat_ret_meta.reindex(idx_common).mean() / strat_ret_meta.reindex(idx_common).std()) * np.sqrt(252) if strat_ret_meta.reindex(idx_common).std() > 0 else np.nan
+    sharpe_ema = (strat_ret_ema.reindex(idx_common).mean() / strat_ret_ema.reindex(idx_common).std()) * np.sqrt(252) if strat_ret_ema.reindex(idx_common).std() > 0 else np.nan
+    hit_meta = _hit_rate(strat_ret_meta.reindex(idx_common), sig_meta["returns"].reindex(idx_common))
+    hit_ema = _hit_rate(strat_ret_ema.reindex(idx_common), sig_ema["returns"].reindex(idx_common))
+    
+    # Contar trades
+    buy_entries_meta = int((sig_meta['position'].reindex(idx_common).diff() == 1).sum())
+    sell_entries_meta = int((sig_meta['position'].reindex(idx_common).diff() == -1).sum())
+    total_trades_meta = buy_entries_meta + sell_entries_meta
+    
+    buy_entries_ema = int((sig_ema['position'].reindex(idx_common).diff() == 1).sum())
+    sell_entries_ema = int((sig_ema['position'].reindex(idx_common).diff() == -1).sum())
+    total_trades_ema = buy_entries_ema + sell_entries_ema
+    
+    # Print comparação
+    print("\n" + "=" * 80)
+    print("COMPARAÇÃO: META-ESTRATÉGIA vs ESTRATÉGIA APENAS COM EMAs")
+    print("=" * 80)
+    print(f"{'Métrica':<30} {'Meta-Estratégia':<20} {'EMA-Only':<20} {'Diferença':<15}")
+    print("-" * 80)
+    print(f"{'Total Return':<30} {total_return_meta:>18.2%} {total_return_ema:>18.2%} {(total_return_meta - total_return_ema):>13.2%}")
+    print(f"{'CAGR (approx)':<30} {cagr_meta:>18.2%} {cagr_ema:>18.2%} {(cagr_meta - cagr_ema):>13.2%}")
+    print(f"{'Sharpe Ratio':<30} {sharpe_meta:>18.2f} {sharpe_ema:>18.2f} {(sharpe_meta - sharpe_ema):>13.2f}")
+    print(f"{'Hit Rate':<30} {hit_meta:>18.2%} {hit_ema:>18.2%} {(hit_meta - hit_ema):>13.2%}")
+    print(f"{'Total Trades':<30} {total_trades_meta:>18d} {total_trades_ema:>18d} {(total_trades_meta - total_trades_ema):>13d}")
+    print(f"{'Buy Entries':<30} {buy_entries_meta:>18d} {buy_entries_ema:>18d} {(buy_entries_meta - buy_entries_ema):>13d}")
+    print(f"{'Sell Entries':<30} {sell_entries_meta:>18d} {sell_entries_ema:>18d} {(sell_entries_meta - sell_entries_ema):>13d}")
+    print("=" * 80)
+    
+    # Gráfico comparativo
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    
+    # 1) Price + EMAs com posições
+    ax1 = axes[0]
+    ax1.plot(sig_meta.index, sig_meta["price"], label="Price", lw=1.5, color="black", zorder=5)
+    ax1.plot(sig_meta.index, sig_meta[f"ema{cfg.ema_fast}"], label=f"EMA {cfg.ema_fast}", lw=1.2, alpha=0.8)
+    ax1.plot(sig_meta.index, sig_meta[f"ema{cfg.ema_slow}"], label=f"EMA {cfg.ema_slow}", lw=1.2, alpha=0.8)
+    
+    # Shade positions for meta-strategy
+    long_mask_meta = sig_meta["position"] == 1
+    short_mask_meta = sig_meta["position"] == -1
+    ax1.fill_between(sig_meta.index, sig_meta["price"].min(), sig_meta["price"].max(),
+                     where=long_mask_meta, color="green", alpha=0.15, label="Meta: Long", zorder=1)
+    ax1.fill_between(sig_meta.index, sig_meta["price"].min(), sig_meta["price"].max(),
+                     where=short_mask_meta, color="red", alpha=0.15, label="Meta: Short", zorder=1)
+    
+    # Shade positions for EMA-only strategy (lighter)
+    long_mask_ema = sig_ema["position"] == 1
+    short_mask_ema = sig_ema["position"] == -1
+    ax1.fill_between(sig_ema.index, sig_ema["price"].min(), sig_ema["price"].max(),
+                     where=long_mask_ema, color="cyan", alpha=0.08, label="EMA-Only: Long", zorder=0)
+    ax1.fill_between(sig_ema.index, sig_ema["price"].min(), sig_ema["price"].max(),
+                     where=short_mask_ema, color="magenta", alpha=0.08, label="EMA-Only: Short", zorder=0)
+    
+    ax1.set_title(f"{ticker} — Price & EMAs: Meta-Estratégia (verde/vermelho) vs EMA-Only (ciano/magenta)", 
+                  fontsize=11, pad=10)
+    ax1.set_ylabel("Price")
+    ax1.legend(loc="best", fontsize=8, ncol=2)
+    ax1.grid(True, alpha=0.3, linestyle="--")
+    
+    # 2) Equity curves comparison
+    ax2 = axes[1]
+    ax2.plot(idx_common, equity_meta, label=f"Meta-Estratégia (Return: {total_return_meta:.2%})", 
+             lw=2, color="blue", alpha=0.8)
+    ax2.plot(idx_common, equity_ema, label=f"EMA-Only (Return: {total_return_ema:.2%})", 
+             lw=2, color="orange", alpha=0.8)
+    ax2.axhline(1.0, color="gray", linestyle="--", linewidth=0.5, alpha=0.5)
+    ax2.set_title("Equity Curves Comparison", fontsize=11, pad=10)
+    ax2.set_ylabel("Cumulative Return")
+    ax2.legend(loc="best", fontsize=9)
+    ax2.grid(True, alpha=0.3, linestyle="--")
+    
+    # 3) Drawdown comparison
+    ax3 = axes[2]
+    ax3.fill_between(idx_common, dd_meta, 0, alpha=0.5, color="blue", label="Meta-Estratégia Drawdown")
+    ax3.fill_between(idx_common, dd_ema, 0, alpha=0.5, color="orange", label="EMA-Only Drawdown")
+    ax3.set_title("Drawdown Comparison", fontsize=11, pad=10)
+    ax3.set_ylabel("Drawdown")
+    ax3.set_xlabel("Date")
+    ax3.legend(loc="best", fontsize=9)
+    ax3.grid(True, alpha=0.3, linestyle="--")
+    
+    plt.tight_layout()
+    plt.show()
+
 def run() -> None:
     print("=" * 60)
     print("META-ESTRATÉGIA DE TRADING - ANÁLISE DE VOLATILIDADE")
@@ -348,11 +462,24 @@ def run() -> None:
             "buy_gate", "sell_gate", "buy_signal", "sell_signal", "position"]
     print(sig[cols].tail(10).to_string())
 
-    # 7) Visualization & metrics
+    # 7) Build EMA-only strategy for comparison
+    print("\n" + "=" * 60)
+    print("Construindo estratégia apenas com EMAs (para comparação)...")
+    print("=" * 60)
+    sig_ema_only = build_ema_only_signals(prices, ema_fast=cfg.ema_fast, ema_slow=cfg.ema_slow)
+    print(f"  ✓ {len(sig_ema_only)} sinais gerados (EMA-only)")
+
+    # 8) Visualization & metrics
     print("\n" + "=" * 60)
     print("Gerando visualizações e métricas...")
     print("=" * 60)
     visualize(sig, cfg, TICKER)
+    
+    # 9) Comparison visualization
+    print("\n" + "=" * 60)
+    print("Gerando comparação: Meta-Estratégia vs EMA-Only...")
+    print("=" * 60)
+    visualize_ema_comparison(sig, sig_ema_only, cfg, TICKER)
     
 if __name__ == "__main__":
     run()
