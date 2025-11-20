@@ -203,37 +203,44 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.plot(sig.index, sig["garch_vol"], label="GARCH Vol")
     plt.plot(sig.index, sig["heston_vol"], label="Heston Vol")
     plt.plot(sig.index, sig["vol_pred_cons"], label="Consensus Vol")
-    vol_hist_col = [c for c in sig.columns if c.startswith("vol_hist_")][0]
-    plt.plot(sig.index, sig[vol_hist_col], label="Benchmark Vol (MA7 de Vol21d)")
+    vol_benchmark_col = "vol_benchmark" if "vol_benchmark" in sig.columns else [c for c in sig.columns if c.startswith("vol_hist_")][0]
+    plt.plot(sig.index, sig[vol_benchmark_col], label="Benchmark Vol (MA7 de Vol21d)")
+    if "vol_forecast_final" in sig.columns:
+        plt.plot(sig.index, sig["vol_forecast_final"], label="Vol Forecast Final (Consenso Inteligente)", linestyle="--", alpha=0.8)
     plt.title(f"{ticker} — Predicted vs Realized Volatility")
     plt.legend()
     plt.tight_layout()
     plt.show()
 
-    # 3️⃣ Z-SCORE
+    # 3️⃣ Z-SCORE (Meta-Estratégia Assimétrica 2.0)
     plt.figure(figsize=(12, 5))
     plt.plot(sig.index, sig["zscore"], label="Z-Score", color="blue", lw=1.2)
     
-    # Show buy and sell thresholds
-    z_thresh = cfg.z_thresholds[cfg.profile]
-    buy_thresh = z_thresh["buy"]
-    sell_thresh = z_thresh["sell"]
+    # Show buy and sell thresholds (Assimétricos)
+    buy_thresh = -0.5  # COMPRA: Z < -0.5 (Calmaria)
+    sell_thresh = 1.5  # VENDA: Z > 1.5 (Medo Real)
+    override_thresh = 1.0  # OVERRIDE: até Z < 1.0 com divergência > 1%
+    exit_short_thresh = 0.5  # Short Exit: Z < 0.5
     
     plt.axhline(buy_thresh, color="green", linestyle="--", linewidth=1.5, 
-                label=f"Buy Threshold ({buy_thresh:.1f})")
+                label=f"Buy Threshold ({buy_thresh:.1f}) - Calmaria")
     plt.axhline(sell_thresh, color="red", linestyle="--", linewidth=1.5, 
-                label=f"Sell Threshold ({sell_thresh:.1f})")
+                label=f"Sell Threshold ({sell_thresh:.1f}) - Medo Real")
+    plt.axhline(override_thresh, color="orange", linestyle=":", linewidth=1, alpha=0.7,
+                label=f"Override Max ({override_thresh:.1f}) - Divergência > 1%")
+    plt.axhline(exit_short_thresh, color="purple", linestyle=":", linewidth=1, alpha=0.7,
+                label=f"Short Exit ({exit_short_thresh:.1f}) - Saída de Pânico")
     plt.axhline(0, color="gray", linestyle="-", linewidth=0.5, alpha=0.5)
     
     # Shade regions
     plt.fill_between(sig.index, sig["zscore"].min(), buy_thresh, 
                      where=(sig["zscore"] < buy_thresh), alpha=0.1, color="green", label="Calmaria (Buy Zone)")
     plt.fill_between(sig.index, sell_thresh, sig["zscore"].max(), 
-                     where=(sig["zscore"] > sell_thresh), alpha=0.1, color="red", label="Risco (Sell Zone)")
+                     where=(sig["zscore"] > sell_thresh), alpha=0.1, color="red", label="Medo Real (Sell Zone)")
     
-    plt.title(f"{ticker} — Z-Score ({cfg.profile} profile)")
+    plt.title(f"{ticker} — Z-Score (Meta-Estratégia Assimétrica 2.0)")
     plt.ylabel("Z-Score")
-    plt.legend(loc="best")
+    plt.legend(loc="best", fontsize=8)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
@@ -431,13 +438,19 @@ def run() -> None:
     print(f"Período: {START} até {sig.index[-1].strftime('%Y-%m-%d')}")
     print(f"Total de dias: {len(sig)}")
     z_thresh = cfg.z_thresholds[PROFILE]
-    print(f"Perfil: {PROFILE} (Buy: {z_thresh['buy']:.1f}, Sell: {z_thresh['sell']:.1f})")
+    print(f"Perfil: {PROFILE} (Meta-Estratégia Assimétrica 2.0)")
+    print(f"  Buy Threshold: Z < -0.5 (Calmaria) + OVERRIDE se divergência > 1%")
+    print(f"  Sell Threshold: Z > 1.5 (Medo Real)")
+    print(f"  Long Exit: EMA 7 cruza abaixo EMA 21")
+    print(f"  Short Exit: EMA 7 cruza acima EMA 21 OU Z < 0.5")
     print(f"\nEstatísticas de Volatilidade:")
     print(f"  Heston (média): {sig['heston_vol'].mean():.6f}")
     print(f"  GARCH (média):  {sig['garch_vol'].mean():.6f}")
     print(f"  Consenso (média): {sig['vol_pred_cons'].mean():.6f}")
-    vol_hist_col = [c for c in sig.columns if c.startswith("vol_hist_")][0]
-    print(f"  Histórica (média): {sig[vol_hist_col].mean():.6f}")
+    vol_benchmark_col = "vol_benchmark" if "vol_benchmark" in sig.columns else [c for c in sig.columns if c.startswith("vol_hist_")][0]
+    print(f"  Benchmark (média): {sig[vol_benchmark_col].mean():.6f}")
+    if "vol_forecast_final" in sig.columns:
+        print(f"  Forecast Final (média): {sig['vol_forecast_final'].mean():.6f}")
     print(f"\nZ-Score:")
     print(f"  Média: {sig['zscore'].mean():.2f}")
     print(f"  Std:   {sig['zscore'].std():.2f}")
@@ -457,10 +470,14 @@ def run() -> None:
     print("=" * 60)
     
     print("\nÚltimas 10 linhas:")
-    cols = ["price", "garch_vol", "heston_vol", "vol_pred_cons", vol_hist_col, "zscore", "risk_state", 
-            "ema_fast_slope", "ema_fast_strong_up", "ema_fast_strong_down",
-            "buy_gate", "sell_gate", "buy_signal", "sell_signal", "position"]
-    print(sig[cols].tail(10).to_string())
+    cols = ["price", "garch_vol", "heston_vol", "vol_pred_cons"]
+    if "vol_forecast_final" in sig.columns:
+        cols.append("vol_forecast_final")
+    cols.extend([vol_benchmark_col, "zscore", "risk_state", 
+            "ema_cross_up", "ema_cross_down",
+            "buy_gate", "sell_gate", "buy_signal", "sell_signal", "position"])
+    available_cols = [c for c in cols if c in sig.columns]
+    print(sig[available_cols].tail(10).to_string())
 
     # 7) Build EMA-only strategy for comparison
     print("\n" + "=" * 60)

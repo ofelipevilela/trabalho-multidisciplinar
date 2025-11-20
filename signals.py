@@ -65,14 +65,21 @@ def build_signals(
     cfg: SignalConfig = SignalConfig(),
 ) -> pd.DataFrame:
     """
-    Implements the meta-strategy logic:
-      1) Consensus predicted volatility (GARCH + Heston)/2
-      2) Benchmark: Média Móvel de 7 dias da Vol Realizada de 21 dias
-      3) Z-Score of predicted vol vs benchmark vol
-      4) COMPRA: Z-Score < threshold (Calmaria) + EMAs para cima
-      5) VENDA: Z-Score > threshold (Risco) + EMAs para baixo
-      6) Discriminação por perfil baseada na confluência das EMAs
-      7) Swing-trade logic: exit only on trend reversal
+    Meta-Estratégia Assimétrica 2.0:
+    
+    1. Engenharia de Features:
+       - Vol_Benchmark: Média móvel de 7 dias da Vol Realizada de 21 dias
+       - Vol_StdDev: Desvio padrão móvel (7 dias) da Volatilidade Histórica
+       - Vol_Forecast_Final: Consenso inteligente (Regras A, B, C)
+       - Z-Score: (Vol_Forecast_Final - Vol_Benchmark) / Vol_StdDev
+    
+    2. Lógica de Entrada Assimétrica:
+       - COMPRA: Gatilho (EMA 7 cruza acima EMA 21) + Filtro (Z < -0.5) + OVERRIDE (divergência > 1%)
+       - VENDA: Gatilho (EMA 7 cruza abaixo EMA 21) + Filtro rigoroso (Z > 1.5)
+    
+    3. Lógica de Saída:
+       - Long Exit: EMA 7 cruza abaixo EMA 21
+       - Short Exit: EMA 7 cruza acima EMA 21 OU Z-Score < 0.5
     """
     # 0) Align inputs and squeeze to Series
     idx, (p_in, gv_in, hv_in) = _align_series(prices, garch_vol, heston_vol)
@@ -84,37 +91,78 @@ def build_signals(
     ret = p.pct_change()
     ret.name = "returns"
 
-    # Benchmark: Média Móvel de 7 dias da Vol Realizada de 21 dias
-    # Step 1: Volatilidade realizada de 21 dias
-    vol_realized_21d = ret.rolling(window=21, min_periods=21).std()
-    # Step 2: Média móvel de 7 dias dessa volatilidade
-    vol_hist = vol_realized_21d.rolling(window=7, min_periods=7).mean()
-    vol_hist.name = "vol_hist_benchmark"  # Benchmark de volatilidade
-
-    # 2) Consensus predicted vol
+    # ============ 1. ENGENHARIA DE FEATURES ============
+    
+    # Step 1: Volatilidade realizada de 21 dias (anualizada)
+    vol_realized_21d = ret.rolling(window=21, min_periods=21).std() * np.sqrt(252)
+    
+    # Step 2: Vol_Benchmark = Média móvel de 7 dias da Vol Realizada de 21 dias
+    vol_benchmark = vol_realized_21d.rolling(window=7, min_periods=7).mean()
+    vol_benchmark.name = "vol_benchmark"
+    
+    # Step 3: Vol_StdDev = Desvio padrão móvel (7 dias) da Volatilidade Histórica
+    vol_stddev = vol_realized_21d.rolling(window=7, min_periods=7).std()
+    vol_stddev.name = "vol_stddev"
+    
+    # Step 4: Vol_Forecast_Final (Consenso Inteligente)
+    # Regra A (Concordância): Se ambos concordam, use média simples
+    # Regra B (GARCH Wins): Se Heston > Benchmark mas GARCH < Benchmark, use GARCH
+    # Regra C (Incerteza): Se Heston < Benchmark mas GARCH > Benchmark, force alto (Risco)
+    
+    below_bench_g = gv_in < vol_benchmark
+    below_bench_h = hv_in < vol_benchmark
+    above_bench_g = gv_in > vol_benchmark
+    above_bench_h = hv_in > vol_benchmark
+    
+    # Regra A: Concordância (ambos > Benchmark ou ambos < Benchmark)
+    agree_both_below = below_bench_g & below_bench_h
+    agree_both_above = above_bench_g & above_bench_h
+    agree_flag = agree_both_below | agree_both_above
+    
+    # Regra B: GARCH Wins (Heston > Benchmark mas GARCH < Benchmark)
+    garch_wins = above_bench_h & below_bench_g
+    
+    # Regra C: Incerteza (Heston < Benchmark mas GARCH > Benchmark) → Force alto (Risco)
+    uncertainty = below_bench_h & above_bench_g
+    
+    # Aplicar regras
+    vol_forecast_final = pd.Series(index=idx, dtype=float, name="vol_forecast_final")
+    
+    # Regra A: Média simples quando concordam
+    vol_forecast_final[agree_flag] = (gv_in[agree_flag] + hv_in[agree_flag]) / 2.0
+    
+    # Regra B: Use GARCH quando GARCH Wins
+    vol_forecast_final[garch_wins] = gv_in[garch_wins]
+    
+    # Regra C: Force alto (Risco) - use o maior valor ou um múltiplo do benchmark
+    # Usamos o máximo entre Heston e GARCH, ou 1.5x o benchmark (o que for maior)
+    vol_forecast_final[uncertainty] = np.maximum(
+        np.maximum(gv_in[uncertainty], hv_in[uncertainty]),
+        vol_benchmark[uncertainty] * 1.5
+    )
+    
+    # Preencher valores faltantes com média simples (fallback)
+    vol_forecast_final = vol_forecast_final.fillna((gv_in + hv_in) / 2.0)
+    
+    # Risk state para análise
+    risk_state = pd.Series("Neutral", index=idx, dtype=object)
+    risk_state.name = "risk_state"
+    risk_state[agree_both_below] = "Calmaria"
+    risk_state[agree_both_above] = "Risco"
+    risk_state[garch_wins] = "Calmaria (GARCH Wins)"
+    risk_state[uncertainty] = "Risco (Incerteza)"
+    
+    # Step 5: Z-Score usando Vol_Forecast_Final
+    # Z-Score = (Vol_Forecast_Final - Vol_Benchmark) / Vol_StdDev
+    z = (vol_forecast_final - vol_benchmark) / vol_stddev.replace(0, np.nan)
+    z = z.replace([np.inf, -np.inf], np.nan)
+    z.name = "zscore"
+    
+    # Manter vol_pred_cons para compatibilidade (média simples)
     vol_pred_cons = (gv_in + hv_in) / 2.0
     vol_pred_cons.name = "vol_pred_cons"
 
-    # 3) Agreement flags (Calmaria / Risco / Neutral)
-    below_hist_g = gv_in < vol_hist
-    below_hist_h = hv_in < vol_hist
-    agree_flag = (below_hist_g & below_hist_h) | ((~below_hist_g) & (~below_hist_h))
-    agree_flag.name = "agree_flag"
-
-    risk_state = pd.Series("Neutral", index=idx, dtype=object)
-    risk_state.name = "risk_state"
-    risk_state[below_hist_g & below_hist_h] = "Calmaria"
-    risk_state[(~below_hist_g) & (~below_hist_h)] = "Risco"
-
-    # 4) Z-Score of predicted vol vs benchmark vol
-    # Z-Score = (Previsão_Consenso - Benchmark_Vol) / Benchmark_StdDev
-    mu = vol_hist.rolling(cfg.zscore_window).mean()  # Média do benchmark
-    sd = vol_hist.rolling(cfg.zscore_window).std()     # Desvio padrão do benchmark
-    z = (vol_pred_cons - mu) / sd.replace(0, np.nan)
-    z = z.replace([np.inf, -np.inf], np.nan)
-    z.name = "zscore"
-
-    # 5) EMAs and trend analysis
+    # ============ 2. EMAs E ANÁLISE DE TENDÊNCIA ============
     ema_fast = _ema(p, cfg.ema_fast)
     ema_fast.name = f"ema{cfg.ema_fast}"
     ema_slow = _ema(p, cfg.ema_slow)
@@ -126,102 +174,72 @@ def build_signals(
     trend_up.name = "trend_up"
     trend_down.name = "trend_down"
     
-    # EMA momentum (direção das EMAs)
-    ema_fast_diff = ema_fast.diff()  # Mudança absoluta na EMA rápida
-    ema_slow_diff = ema_slow.diff()  # Mudança absoluta na EMA lenta
+    # Detectar cruzamentos (gatilhos)
+    trend_up_prev = trend_up.shift(1).fillna(False)
+    trend_down_prev = trend_down.shift(1).fillna(False)
     
-    # Inclinação relativa da EMA rápida (normalizada pelo preço)
-    # Isso permite comparar a força do movimento independente do nível de preço
-    # Inclinação = mudança absoluta / preço atual (em %)
-    ema_fast_slope = (ema_fast_diff / p.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
-    ema_fast_slope.name = "ema_fast_slope"
+    # Gatilho COMPRA: EMA 7 cruza acima EMA 21
+    ema_cross_up = trend_up & (~trend_up_prev)
+    ema_cross_up.name = "ema_cross_up"
     
-    # Confluência: ambas EMAs na mesma direção
-    # Para COMPRA: ambas subindo (confluentes) OU divergentes (só agressivo)
-    ema_fast_rising = ema_fast_diff > 0  # EMA rápida subindo
-    ema_slow_rising = ema_slow_diff > 0  # EMA lenta subindo
-    ema_fast_falling = ema_fast_diff < 0  # EMA rápida descendo
-    ema_slow_falling = ema_slow_diff < 0  # EMA lenta descendo
+    # Gatilho VENDA: EMA 7 cruza abaixo EMA 21
+    ema_cross_down = trend_down & (~trend_down_prev)
+    ema_cross_down.name = "ema_cross_down"
     
-    # Confluência para COMPRA: ambas subindo
+    # Divergência entre EMAs (para OVERRIDE)
+    # Divergência = (EMA_fast - EMA_slow) / EMA_slow (em %)
+    ema_divergence_pct = ((ema_fast - ema_slow) / ema_slow.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    ema_divergence_pct.name = "ema_divergence_pct"
+    
+    # EMA momentum (para análise)
+    ema_fast_diff = ema_fast.diff()
+    ema_slow_diff = ema_slow.diff()
+    ema_fast_diff.name = "ema_fast_diff"
+    ema_slow_diff.name = "ema_slow_diff"
+    
+    # ============ 3. LÓGICA DE ENTRADA ASSIMÉTRICA ============
+    
+    # COMPRA (Long):
+    # Gatilho: EMA 7 cruza acima EMA 21
+    # Filtro: Z-Score < -0.5 (Calmaria)
+    # OVERRIDE: Se divergência > 1%, ignore filtro até Z-Score +1.0
+    
+    buy_vol_filter = (z < -0.5)  # Filtro padrão: Calmaria
+    buy_override = (ema_divergence_pct > 0.01) & (z < 1.0)  # OVERRIDE: divergência > 1% e Z < 1.0
+    buy_signal = ema_cross_up & (buy_vol_filter | buy_override)
+    buy_signal.name = "buy_signal"
+    
+    # VENDA (Short):
+    # Gatilho: EMA 7 cruza abaixo EMA 21
+    # Filtro rigoroso: Z-Score > 1.5 (Medo Real)
+    
+    sell_vol_filter = (z > 1.5)  # Filtro rigoroso: Medo Real
+    sell_signal = ema_cross_down & sell_vol_filter
+    sell_signal.name = "sell_signal"
+    
+    # Flags para análise
+    buy_gate = buy_vol_filter
+    buy_gate.name = "buy_gate"
+    sell_gate = sell_vol_filter
+    sell_gate.name = "sell_gate"
+    
+    # Flags de confluência/divergência (mantidas para compatibilidade)
+    ema_fast_rising = ema_fast_diff > 0
+    ema_slow_rising = ema_slow_diff > 0
+    ema_fast_falling = ema_fast_diff < 0
+    ema_slow_falling = ema_slow_diff < 0
     ema_confluent_buy = ema_fast_rising & ema_slow_rising
-    # Confluência para VENDA: ambas descendo
     ema_confluent_sell = ema_fast_falling & ema_slow_falling
-    # Divergência: direções opostas (só agressivo)
     ema_divergent = (ema_fast_rising & ema_slow_falling) | (ema_fast_falling & ema_slow_rising)
-    
     ema_confluent_buy.name = "ema_confluent_buy"
     ema_confluent_sell.name = "ema_confluent_sell"
     ema_divergent.name = "ema_divergent"
     
-    # Filtro de inclinação mínima (força da EMA rápida) - DESATIVADO
-    # Mantido apenas para análise/debugging, mas não usado na lógica de entrada
-    # Para COMPRA: EMA rápida deve ter inclinação positiva acima do threshold
-    # ema_fast_min_slope = 0.0005  # 0.05% do preço
-    # ema_fast_strong_up = ema_fast_slope > ema_fast_min_slope
-    # Para VENDA: EMA rápida deve ter inclinação negativa abaixo do threshold negativo
-    # ema_fast_strong_down = ema_fast_slope < -ema_fast_min_slope
-    # 
-    # ema_fast_strong_up.name = "ema_fast_strong_up"
-    # ema_fast_strong_down.name = "ema_fast_strong_down"
-    
-    # Criando flags vazias para manter compatibilidade (mas não usadas na lógica)
-    ema_fast_strong_up = pd.Series(True, index=idx, name="ema_fast_strong_up")  # Sempre True (desativado)
-    ema_fast_strong_down = pd.Series(True, index=idx, name="ema_fast_strong_down")  # Sempre True (desativado)
-
-    # 6) Profile gates for BUY and SELL
-    z_thresh = cfg.z_thresholds[cfg.profile]
-    buy_threshold = z_thresh["buy"]  # Negativo (ex: -1.0)
-    sell_threshold = z_thresh["sell"]  # Positivo (ex: +1.0)
-    
-    # Buy gate: Z-Score < threshold (Calmaria)
-    buy_gate = (z < buy_threshold)
-    buy_gate.name = "buy_gate"
-    
-    # Sell gate: Z-Score > threshold (Risco)
-    sell_gate = (z > sell_threshold)
-    sell_gate.name = "sell_gate"
-
-    # 7) Entry signals with profile discrimination
-    # REGRA CRÍTICA - NUNCA OPERAR CONTRA A TENDÊNCIA:
-    # - COMPRA: Só se Calmaria (Z < threshold) + EMAs para CIMA (trend_up)
-    # - VENDA: Só se Risco (Z > threshold) + EMAs para BAIXO (trend_down)
-    # - Calmaria + EMAs para baixo → NINGUÉM entra (nem agressivo) - vai contra o mercado!
-    # - Risco + EMAs para cima → NINGUÉM entra - vai contra o mercado!
-    
-    # COMPRA: Calmaria + EMAs para cima + confluência/divergência por perfil
-    # OBRIGATÓRIO: trend_up (EMAs para cima) - SEM EXCEÇÃO!
-    if cfg.profile == "aggressive":
-        # Agressivo pode entrar em divergência, MAS APENAS se trend_up
-        # Divergência permitida: EMA rápida subindo mas lenta descendo (ainda trend_up)
-        # OU EMA rápida descendo mas lenta subindo (ainda trend_up) - mas isso é raro
-        # Na prática: divergência só faz sentido se ainda estiver trend_up
-        buy_ema_filter = ema_confluent_buy | (ema_divergent & trend_up)
-    else:
-        # Conservador/Moderado: só entra em confluência (ambas subindo)
-        buy_ema_filter = ema_confluent_buy
-    
-    # COMPRA: buy_gate (Calmaria) + trend_up (EMAs para cima) + filtro de confluência
-    # GARANTIA: Se trend_down, buy_signal = False (mesmo com Calmaria)
-    buy_signal = buy_gate & trend_up & buy_ema_filter
-    buy_signal.name = "buy_signal"
-    
-    # VENDA: Risco + EMAs para baixo + confluência/divergência por perfil
-    # OBRIGATÓRIO: trend_down (EMAs para baixo) - SEM EXCEÇÃO!
-    if cfg.profile == "aggressive":
-        # Agressivo pode entrar em divergência, MAS APENAS se trend_down
-        # Divergência permitida: EMA rápida descendo mas lenta subindo (ainda trend_down)
-        # OU EMA rápida subindo mas lenta descendo (ainda trend_down) - mas isso é raro
-        # Na prática: divergência só faz sentido se ainda estiver trend_down
-        sell_ema_filter = ema_confluent_sell | (ema_divergent & trend_down)
-    else:
-        # Conservador/Moderado: só entra em confluência (ambas descendo)
-        sell_ema_filter = ema_confluent_sell
-    
-    # VENDA: sell_gate (Risco) + trend_down (EMAs para baixo) + filtro de confluência
-    # GARANTIA: Se trend_up, sell_signal = False (mesmo com Risco)
-    sell_signal = sell_gate & trend_down & sell_ema_filter
-    sell_signal.name = "sell_signal"
+    # EMA slope (para análise)
+    ema_fast_slope = (ema_fast_diff / p.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    ema_fast_slope.name = "ema_fast_slope"
+    ema_fast_strong_up = pd.Series(True, index=idx, name="ema_fast_strong_up")
+    ema_fast_strong_down = pd.Series(True, index=idx, name="ema_fast_strong_down")
     
     # ============ BACKUP DA LÓGICA COM FILTRO DE INCLINAÇÃO ============
     # LÓGICA COM INCLINAÇÃO: Confluência/divergência + Filtro de Inclinação Mínima
@@ -241,22 +259,31 @@ def build_signals(
     # sell_signal_with_slope = sell_gate & trend_down & sell_ema_filter_with_slope
     # ===============================================================================
 
-    # 8) Swing-trade persistence logic
+    # ============ 4. LÓGICA DE SAÍDA ASSIMÉTRICA ============
     # Position: +1 (compra), -1 (venda), 0 (neutro)
     position = pd.Series(0, index=idx, dtype=int, name="position")
     
-    # ============ LÓGICA ATIVA (RESTAURADA) ============
-    # Saída baseada no cruzamento das EMAs (trend_up/trend_down)
-    # Mantém posição enquanto a tendência permanece favorável
+    # Long Exit: Quando EMA 7 cruza abaixo EMA 21
+    # Short Exit: Quando EMA 7 cruza acima EMA 21 OU Z-Score < 0.5 (Saída de Pânico)
+    
     for i in range(1, len(idx)):
         prev_pos = position.iat[i - 1]
         
-        if prev_pos == 1:  # Em posição de COMPRA
-            # Mantém compra enquanto trend_up, fecha se trend_down
-            position.iat[i] = 1 if trend_up.iat[i] else 0
-        elif prev_pos == -1:  # Em posição de VENDA
-            # Mantém venda enquanto trend_down, fecha se trend_up
-            position.iat[i] = -1 if trend_down.iat[i] else 0
+        if prev_pos == 1:  # Em posição de COMPRA (Long)
+            # Long Exit: EMA 7 cruza abaixo EMA 21
+            if trend_down.iat[i]:
+                position.iat[i] = 0  # Sair
+            else:
+                position.iat[i] = 1  # Manter
+                
+        elif prev_pos == -1:  # Em posição de VENDA (Short)
+            # Short Exit: EMA 7 cruza acima EMA 21 OU Z-Score < 0.5
+            z_val = z.iat[i] if not pd.isna(z.iat[i]) else np.inf
+            if trend_up.iat[i] or (z_val < 0.5):
+                position.iat[i] = 0  # Sair
+            else:
+                position.iat[i] = -1  # Manter
+                
         else:  # Neutro (0)
             # Entra em compra ou venda baseado nos sinais
             if buy_signal.iat[i]:
@@ -311,23 +338,22 @@ def build_signals(
     #             position.iat[i] = 0
     # =================================================================
 
-    # 9) Assemble DataFrame
-    # Adicionar ema_fast_diff e ema_slow_diff para análise da lógica de saída
-    ema_fast_diff.name = "ema_fast_diff"
-    ema_slow_diff.name = "ema_slow_diff"
-    
+    # ============ 5. ASSEMBLE DATAFRAME ============
     df = pd.concat(
         [
             p,
             ret,
             ema_fast,
             ema_slow,
-            ema_fast_diff,  # Mudança na EMA rápida (usada para saída)
-            ema_slow_diff,  # Mudança na EMA lenta (para análise)
-            vol_hist,
+            ema_fast_diff,
+            ema_slow_diff,
+            ema_divergence_pct,
+            vol_benchmark,
+            vol_stddev,
+            vol_forecast_final,
+            vol_pred_cons,  # Mantido para compatibilidade
             gv_in,
             hv_in,
-            vol_pred_cons,
             z,
             risk_state,
             agree_flag,
@@ -335,12 +361,14 @@ def build_signals(
             sell_gate,
             trend_up,
             trend_down,
+            ema_cross_up,
+            ema_cross_down,
             ema_confluent_buy,
             ema_confluent_sell,
             ema_divergent,
-            ema_fast_slope,  # Inclinação relativa da EMA rápida
-            ema_fast_strong_up,  # EMA rápida com inclinação forte para cima
-            ema_fast_strong_down,  # EMA rápida com inclinação forte para baixo
+            ema_fast_slope,
+            ema_fast_strong_up,
+            ema_fast_strong_down,
             buy_signal,
             sell_signal,
             position,
@@ -349,7 +377,7 @@ def build_signals(
     )
 
     # Warm-up: disable early positions (onde não há dados suficientes)
-    warmup_mask = vol_hist.isna() | z.isna() | ema_fast.isna() | ema_slow.isna()
+    warmup_mask = vol_benchmark.isna() | z.isna() | ema_fast.isna() | ema_slow.isna()
     df.loc[warmup_mask, "position"] = 0
     df["position"] = df["position"].astype(int)
 
