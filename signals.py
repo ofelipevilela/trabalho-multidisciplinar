@@ -114,6 +114,20 @@ def build_signals(
     z = z.replace([np.inf, -np.inf], np.nan)
     z.name = "zscore"
 
+    # --- SMART VOLATILITY (Downside Filter) ---
+    # Calculate Downside Volatility (std of negative returns)
+    ret_neg = ret.copy()
+    ret_neg[ret > 0] = 0
+    vol_downside = ret_neg.rolling(window=21, min_periods=21).std()
+    vol_downside.name = "vol_downside"
+    
+    # Z-Score of Downside Volatility (relative to its own history)
+    mu_down = vol_downside.rolling(cfg.zscore_window).mean()
+    sd_down = vol_downside.rolling(cfg.zscore_window).std()
+    z_down = (vol_downside - mu_down) / sd_down.replace(0, np.nan)
+    z_down = z_down.replace([np.inf, -np.inf], np.nan)
+    z_down.name = "zscore_downside"
+
     # 5) EMAs and trend analysis
     ema_fast = _ema(p, cfg.ema_fast)
     ema_fast.name = f"ema{cfg.ema_fast}"
@@ -131,138 +145,121 @@ def build_signals(
     ema_slow_diff = ema_slow.diff()  # Mudança absoluta na EMA lenta
     
     # Inclinação relativa da EMA rápida (normalizada pelo preço)
-    # Isso permite comparar a força do movimento independente do nível de preço
-    # Inclinação = mudança absoluta / preço atual (em %)
     ema_fast_slope = (ema_fast_diff / p.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
     ema_fast_slope.name = "ema_fast_slope"
     
     # Confluência: ambas EMAs na mesma direção
-    # Para COMPRA: ambas subindo (confluentes) OU divergentes (só agressivo)
-    ema_fast_rising = ema_fast_diff > 0  # EMA rápida subindo
-    ema_slow_rising = ema_slow_diff > 0  # EMA lenta subindo
-    ema_fast_falling = ema_fast_diff < 0  # EMA rápida descendo
-    ema_slow_falling = ema_slow_diff < 0  # EMA lenta descendo
+    ema_fast_rising = ema_fast_diff > 0
+    ema_slow_rising = ema_slow_diff > 0
+    ema_fast_falling = ema_fast_diff < 0
+    ema_slow_falling = ema_slow_diff < 0
     
-    # Confluência para COMPRA: ambas subindo
     ema_confluent_buy = ema_fast_rising & ema_slow_rising
-    # Confluência para VENDA: ambas descendo
     ema_confluent_sell = ema_fast_falling & ema_slow_falling
-    # Divergência: direções opostas (só agressivo)
     ema_divergent = (ema_fast_rising & ema_slow_falling) | (ema_fast_falling & ema_slow_rising)
     
     ema_confluent_buy.name = "ema_confluent_buy"
     ema_confluent_sell.name = "ema_confluent_sell"
     ema_divergent.name = "ema_divergent"
     
-    # Filtro de inclinação mínima (força da EMA rápida) - DESATIVADO
-    # Mantido apenas para análise/debugging, mas não usado na lógica de entrada
-    # Para COMPRA: EMA rápida deve ter inclinação positiva acima do threshold
-    # ema_fast_min_slope = 0.0005  # 0.05% do preço
-    # ema_fast_strong_up = ema_fast_slope > ema_fast_min_slope
-    # Para VENDA: EMA rápida deve ter inclinação negativa abaixo do threshold negativo
-    # ema_fast_strong_down = ema_fast_slope < -ema_fast_min_slope
-    # 
-    # ema_fast_strong_up.name = "ema_fast_strong_up"
-    # ema_fast_strong_down.name = "ema_fast_strong_down"
-    
-    # Criando flags vazias para manter compatibilidade (mas não usadas na lógica)
-    ema_fast_strong_up = pd.Series(True, index=idx, name="ema_fast_strong_up")  # Sempre True (desativado)
-    ema_fast_strong_down = pd.Series(True, index=idx, name="ema_fast_strong_down")  # Sempre True (desativado)
+    ema_fast_strong_up = pd.Series(True, index=idx, name="ema_fast_strong_up")
+    ema_fast_strong_down = pd.Series(True, index=idx, name="ema_fast_strong_down")
 
     # 6) Profile gates for BUY and SELL
     z_thresh = cfg.z_thresholds[cfg.profile]
     buy_threshold = z_thresh["buy"]  # Negativo (ex: -1.0)
     sell_threshold = z_thresh["sell"]  # Positivo (ex: +1.0)
     
-    # Buy gate: Z-Score < threshold (Calmaria)
-    buy_gate = (z < buy_threshold)
+    # Buy gate: SMART VOLATILITY -> Use Downside Z-Score instead of Total Z-Score
+    # Se Downside Vol for baixa (Z < Threshold), permitimos a compra (mesmo que Vol Total seja alta)
+    buy_gate = (z_down < 1.0) # Hardcoded threshold for safety (1.0 std dev above mean)
+    # Note: Using 1.0 as a reasonable "Normal" limit. If > 1.0, downside risk is elevated.
     buy_gate.name = "buy_gate"
     
-    # Sell gate: Z-Score > threshold (Risco)
+    # Sell gate: Keep original logic (High Total Vol is good for Shorting? Or High Downside?)
+    # For Shorting, High Downside Vol is actually what we want to ride? 
+    # Or do we want to enter BEFORE it crashes?
+    # Let's keep original Sell Gate (High Total Vol) for now, as Shorting is risky.
     sell_gate = (z > sell_threshold)
     sell_gate.name = "sell_gate"
 
     # 7) Entry signals with profile discrimination
-    # REGRA CRÍTICA - NUNCA OPERAR CONTRA A TENDÊNCIA:
-    # - COMPRA: Só se Calmaria (Z < threshold) + EMAs para CIMA (trend_up)
-    # - VENDA: Só se Risco (Z > threshold) + EMAs para BAIXO (trend_down)
-    # - Calmaria + EMAs para baixo → NINGUÉM entra (nem agressivo) - vai contra o mercado!
-    # - Risco + EMAs para cima → NINGUÉM entra - vai contra o mercado!
+    # DYNAMIC EXIT STRATEGY:
+    # 1. ALWAYS ENTER on Trend Up (Don't filter entries).
+    # 2. LONG ONLY (Disable Shorts).
     
-    # COMPRA: Calmaria + EMAs para cima + confluência/divergência por perfil
-    # OBRIGATÓRIO: trend_up (EMAs para cima) - SEM EXCEÇÃO!
-    if cfg.profile == "aggressive":
-        # Agressivo pode entrar em divergência, MAS APENAS se trend_up
-        # Divergência permitida: EMA rápida subindo mas lenta descendo (ainda trend_up)
-        # OU EMA rápida descendo mas lenta subindo (ainda trend_up) - mas isso é raro
-        # Na prática: divergência só faz sentido se ainda estiver trend_up
-        buy_ema_filter = ema_confluent_buy | (ema_divergent & trend_up)
-    else:
-        # Conservador/Moderado: só entra em confluência (ambas subindo)
-        buy_ema_filter = ema_confluent_buy
-    
-    # COMPRA: buy_gate (Calmaria) + trend_up (EMAs para cima) + filtro de confluência
-    # GARANTIA: Se trend_down, buy_signal = False (mesmo com Calmaria)
-    buy_signal = buy_gate & trend_up & buy_ema_filter
+    # COMPRA: Apenas Trend Up (Médias Cruzadas para Cima)
+    # Ignoramos buy_gate e filtros de volatilidade na entrada.
+    buy_signal = trend_up
     buy_signal.name = "buy_signal"
     
-    # VENDA: Risco + EMAs para baixo + confluência/divergência por perfil
-    # OBRIGATÓRIO: trend_down (EMAs para baixo) - SEM EXCEÇÃO!
-    if cfg.profile == "aggressive":
-        # Agressivo pode entrar em divergência, MAS APENAS se trend_down
-        # Divergência permitida: EMA rápida descendo mas lenta subindo (ainda trend_down)
-        # OU EMA rápida subindo mas lenta descendo (ainda trend_down) - mas isso é raro
-        # Na prática: divergência só faz sentido se ainda estiver trend_down
-        sell_ema_filter = ema_confluent_sell | (ema_divergent & trend_down)
-    else:
-        # Conservador/Moderado: só entra em confluência (ambas descendo)
-        sell_ema_filter = ema_confluent_sell
+    # VENDA: Desativada (Long-Only)
+    # Apostar contra o S&P 500 tem sido perdedor.
+    sell_signal = pd.Series(False, index=idx, name="sell_signal")
     
-    # VENDA: sell_gate (Risco) + trend_down (EMAs para baixo) + filtro de confluência
-    # GARANTIA: Se trend_up, sell_signal = False (mesmo com Risco)
-    sell_signal = sell_gate & trend_down & sell_ema_filter
-    sell_signal.name = "sell_signal"
-    
-    # ============ BACKUP DA LÓGICA COM FILTRO DE INCLINAÇÃO ============
-    # LÓGICA COM INCLINAÇÃO: Confluência/divergência + Filtro de Inclinação Mínima
-    # A EMA rápida precisa ter inclinação suficiente para mostrar FORÇA na direção
-    # if cfg.profile == "aggressive":
-    #     buy_ema_confluence = ema_confluent_buy | (ema_divergent & trend_up)
-    # else:
-    #     buy_ema_confluence = ema_confluent_buy
-    # buy_ema_filter_with_slope = buy_ema_confluence & ema_fast_strong_up
-    # buy_signal_with_slope = buy_gate & trend_up & buy_ema_filter_with_slope
-    # 
-    # if cfg.profile == "aggressive":
-    #     sell_ema_confluence = ema_confluent_sell | (ema_divergent & trend_down)
-    # else:
-    #     sell_ema_confluence = ema_confluent_sell
-    # sell_ema_filter_with_slope = sell_ema_confluence & ema_fast_strong_down
-    # sell_signal_with_slope = sell_gate & trend_down & sell_ema_filter_with_slope
-    # ===============================================================================
-
     # 8) Swing-trade persistence logic
-    # Position: +1 (compra), -1 (venda), 0 (neutro)
     position = pd.Series(0, index=idx, dtype=int, name="position")
     
-    # ============ LÓGICA ATIVA (RESTAURADA) ============
-    # Saída baseada no cruzamento das EMAs (trend_up/trend_down)
-    # Mantém posição enquanto a tendência permanece favorável
+    # ============ LÓGICA ATIVA (DYNAMIC EXIT) ============
+    # Regime Calmo (Z <= 0): Saída Lenta (Cruzamento de Médias)
+    # Regime Risco (Z > 0):  Saída Rápida (2-Day Rule)
+    
+    days_against_trend = 0
+    
     for i in range(1, len(idx)):
         prev_pos = position.iat[i - 1]
+        curr_price = p.iat[i]
+        curr_ema_fast = ema_fast.iat[i]
+        curr_z_down = z_down.iat[i]
+        
+        # Tratar NaN no Z-Score (início da série) como Risco (modo seguro)
+        # GENERALIZAÇÃO: Usar Z-Score de Downside em vez de Total
+        # Isso evita sair de ralis fortes (alta volatilidade de alta)
+        is_risky = True if pd.isna(curr_z_down) else (curr_z_down > 0)
         
         if prev_pos == 1:  # Em posição de COMPRA
-            # Mantém compra enquanto trend_up, fecha se trend_down
-            position.iat[i] = 1 if trend_up.iat[i] else 0
-        elif prev_pos == -1:  # Em posição de VENDA
-            # Mantém venda enquanto trend_down, fecha se trend_up
-            position.iat[i] = -1 if trend_down.iat[i] else 0
+            # Lógica de Saída Dinâmica
+            should_exit = False
+            
+            if is_risky:
+                # REGIME DE RISCO: Usar Saída Rápida (2-Day Rule)
+                # Se preço fechar abaixo da EMA Rápida por 2 dias -> SAI
+                if curr_price < curr_ema_fast:
+                    days_against_trend += 1
+                    if days_against_trend >= 2:
+                        should_exit = True
+                else:
+                    days_against_trend = 0
+                    
+                # Também sai se a tendência virar (Cruzamento), caso o Fast Exit não tenha disparado
+                if not trend_up.iat[i]:
+                    should_exit = True
+                    
+            else:
+                # REGIME CALMO: Usar Saída Lenta (Apenas Cruzamento)
+                # Ignora "wicks" abaixo da EMA rápida. Só sai se a tendência virar.
+                days_against_trend = 0 # Reset contador (não importa aqui)
+                
+                if not trend_up.iat[i]: # Cruzamento para baixo
+                    should_exit = True
+            
+            # Aplica a decisão
+            if should_exit:
+                position.iat[i] = 0
+                days_against_trend = 0
+            else:
+                position.iat[i] = 1
+                
+        elif prev_pos == -1:
+            # Não deve acontecer em Long-Only, mas por segurança zeramos
+            position.iat[i] = 0
+                
         else:  # Neutro (0)
-            # Entra em compra ou venda baseado nos sinais
+            days_against_trend = 0
+            
+            # Entra se houver sinal de compra (Trend Up)
             if buy_signal.iat[i]:
                 position.iat[i] = 1
-            elif sell_signal.iat[i]:
-                position.iat[i] = -1
             else:
                 position.iat[i] = 0
     
@@ -328,7 +325,9 @@ def build_signals(
             gv_in,
             hv_in,
             vol_pred_cons,
+            vol_downside,  # New
             z,
+            z_down,        # New
             risk_state,
             agree_flag,
             buy_gate,
