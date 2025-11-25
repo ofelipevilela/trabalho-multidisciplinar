@@ -262,6 +262,130 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.show()
 
 
+def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
+    """
+    Display charts and performance metrics specifically for EMA-Only strategy.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # --- metrics prep ---
+    strat_ret = _strategy_returns(sig)
+    equity = _equity_curve(strat_ret)
+    dd = _drawdown(equity)
+
+    total_return = equity.iloc[-1] - 1.0
+    cagr = (equity.iloc[-1] ** (252 / max(1, len(sig)))) - 1.0
+    vol_ann = sig["returns"].std() * np.sqrt(252)
+    strat_vol_ann = strat_ret.std() * np.sqrt(252)
+    sharpe = (strat_ret.mean() / strat_ret.std()) * np.sqrt(252) if strat_ret.std() > 0 else np.nan
+    hit = _hit_rate(strat_ret, sig["returns"])
+
+    # Count trades
+    buy_entries = int((sig['position'].diff() == 1).sum())
+    sell_entries = int((sig['position'].diff() == -1).sum())
+    total_trades = buy_entries + sell_entries
+    
+    # Position statistics
+    days_long = int((sig['position'] == 1).sum())
+    days_short = int((sig['position'] == -1).sum())
+    days_neutral = int((sig['position'] == 0).sum())
+    
+    print("\n=== EMA-ONLY STRATEGY METRICS ===")
+    print(f"Ticker             : {ticker}")
+    print(f"Total Trades       : {total_trades} (Compras: {buy_entries}, Vendas: {sell_entries})")
+    print(f"Days in Position   : Long={days_long}, Short={days_short}, Neutral={days_neutral}")
+    print(f"Total Return       : {total_return: .2%}")
+    print(f"CAGR (approx)      : {cagr: .2%}")
+    print(f"Asset Vol (ann)    : {vol_ann: .2%}")
+    print(f"Strategy Vol (ann) : {strat_vol_ann: .2%}")
+    print(f"Sharpe (no RF)     : {sharpe: .2f}")
+    print(f"Hit Rate           : {hit: .2%}")
+
+    # 1️⃣ PRICE + EMAs + POSITION (com marcadores de entrada/saída)
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    # Plot price and EMAs
+    ax.plot(sig.index, sig["price"], label="Price", lw=1.5, color="black", zorder=5)
+    ax.plot(sig.index, sig[f"ema{cfg.ema_fast}"], label=f"EMA {cfg.ema_fast}", lw=1.2, alpha=0.8)
+    ax.plot(sig.index, sig[f"ema{cfg.ema_slow}"], label=f"EMA {cfg.ema_slow}", lw=1.2, alpha=0.8)
+    
+    # Shade long positions (green) and short positions (red)
+    long_mask = sig["position"] == 1
+    short_mask = sig["position"] == -1
+    ax.fill_between(sig.index, sig["price"].min(), sig["price"].max(),
+                    where=long_mask, color="green", alpha=0.12, label="Long Position", zorder=1)
+    ax.fill_between(sig.index, sig["price"].min(), sig["price"].max(),
+                    where=short_mask, color="red", alpha=0.12, label="Short Position", zorder=1)
+    
+    # Detect entry and exit points
+    # Logic updated for Stop-and-Reverse (direct flips 1 <-> -1)
+    prev_position = sig["position"].shift(1).fillna(0).astype(int)
+    curr_position = sig["position"]
+    
+    # Buy Entry: Current is 1, Prev was NOT 1
+    buy_entries_mask = (curr_position == 1) & (prev_position != 1)
+    buy_entries_idx = buy_entries_mask[buy_entries_mask].index
+    if len(buy_entries_idx) > 0:
+        buy_entry_prices = sig.loc[buy_entries_idx, "price"]
+        ax.scatter(buy_entries_idx, buy_entry_prices, marker="^", color="lime", 
+                  s=120, zorder=15, label=f"Buy Entry ({len(buy_entries_idx)})", 
+                  edgecolors="darkgreen", linewidths=2, alpha=0.9)
+    
+    # Sell Entry: Current is -1, Prev was NOT -1
+    sell_entries_mask = (curr_position == -1) & (prev_position != -1)
+    sell_entries_idx = sell_entries_mask[sell_entries_mask].index
+    if len(sell_entries_idx) > 0:
+        sell_entry_prices = sig.loc[sell_entries_idx, "price"]
+        ax.scatter(sell_entries_idx, sell_entry_prices, marker="v", color="red", 
+                  s=120, zorder=15, label=f"Sell Entry ({len(sell_entries_idx)})", 
+                  edgecolors="darkred", linewidths=2, alpha=0.9)
+    
+    # Long Exit: Prev was 1, Current is NOT 1
+    long_exits_mask = (prev_position == 1) & (curr_position != 1)
+    long_exits_idx = long_exits_mask[long_exits_mask].index
+    if len(long_exits_idx) > 0:
+        long_exit_prices = sig.loc[long_exits_idx, "price"]
+        ax.scatter(long_exits_idx, long_exit_prices, marker="X", color="orange", 
+                  s=100, zorder=15, label=f"Long Exit ({len(long_exits_idx)})", 
+                  edgecolors="darkorange", linewidths=1.5, alpha=0.85)
+    
+    # Short Exit: Prev was -1, Current is NOT -1
+    short_exits_mask = (prev_position == -1) & (curr_position != -1)
+    short_exits_idx = short_exits_mask[short_exits_mask].index
+    if len(short_exits_idx) > 0:
+        short_exit_prices = sig.loc[short_exits_idx, "price"]
+        ax.scatter(short_exits_idx, short_exit_prices, marker="X", color="orange", 
+                  s=100, zorder=15, label=f"Short Exit ({len(short_exits_idx)})", 
+                  edgecolors="darkorange", linewidths=1.5, alpha=0.85)
+    
+    ax.set_title(f"{ticker} — EMA-Only Strategy: Price & Signals\n"
+                f"Green=Long | Red=Short | Markers: ↑Buy ↓Sell ✗Exit", 
+                fontsize=11, pad=10)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.legend(loc="best", fontsize=9)
+    ax.grid(True, alpha=0.3, linestyle="--")
+    plt.tight_layout()
+    plt.show()
+
+    # 2️⃣ EQUITY & DRAWDOWN
+    fig, ax = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    ax[0].plot(sig.index, equity, color="blue")
+    ax[0].set_title("EMA-Only Strategy Equity")
+    ax[1].plot(sig.index, dd, color="red")
+    ax[1].set_title("Drawdown")
+    plt.tight_layout()
+    plt.show()
+
+    # 3️⃣ HISTOGRAM
+    plt.figure(figsize=(7, 4))
+    plt.hist(strat_ret.dropna(), bins=40, alpha=0.7)
+    plt.title(f"{ticker} — EMA-Only Daily Returns Distribution")
+    plt.tight_layout()
+    plt.show()
+
+
 def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg, ticker: str) -> None:
     """
     Compara a meta-estratégia (com modelo de volatilidade) vs estratégia apenas com EMAs.
@@ -485,6 +609,12 @@ def run() -> None:
     print("=" * 60)
     sig_ema_only = build_ema_only_signals(prices, ema_fast=cfg.ema_fast, ema_slow=cfg.ema_slow)
     print(f"  ✓ {len(sig_ema_only)} sinais gerados (EMA-only)")
+    
+    # 7.1) Visualize EMA-only strategy
+    print("\n" + "=" * 60)
+    print("Gerando visualizações para EMA-Only...")
+    print("=" * 60)
+    visualize_ema_only(sig_ema_only, cfg, TICKER)
 
     # 8) Visualization & metrics
     print("\n" + "=" * 60)

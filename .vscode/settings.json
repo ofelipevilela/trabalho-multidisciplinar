@@ -3,6 +3,10 @@
     "python.analysis.extraPaths": [
       "${workspaceFolder}"
     ],
-    "python.analysis.autoImportCompletions": true
+    "python.analysis.autoImportCompletions": true,
+    "cursorpyright.analysis.autoImportCompletions": true,
+    "cursorpyright.analysis.extraPaths": [
+      "${workspaceFolder}"
+    ]
   }
   
