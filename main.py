@@ -108,8 +108,11 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     hit = _hit_rate(strat_ret, sig["returns"])
 
     # Count trades
-    buy_entries = int((sig['position'].diff() == 1).sum())
-    sell_entries = int((sig['position'].diff() == -1).sum())
+    # Robust logic for Stop-and-Reverse (diff can be 2 or -2)
+    pos = sig['position']
+    prev_pos = pos.shift(1).fillna(0)
+    buy_entries = int(((pos == 1) & (prev_pos != 1)).sum())
+    sell_entries = int(((pos == -1) & (prev_pos != -1)).sum())
     total_trades = buy_entries + sell_entries
     
     # Position statistics
@@ -282,8 +285,10 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     hit = _hit_rate(strat_ret, sig["returns"])
 
     # Count trades
-    buy_entries = int((sig['position'].diff() == 1).sum())
-    sell_entries = int((sig['position'].diff() == -1).sum())
+    pos = sig['position']
+    prev_pos = pos.shift(1).fillna(0)
+    buy_entries = int(((pos == 1) & (prev_pos != 1)).sum())
+    sell_entries = int(((pos == -1) & (prev_pos != -1)).sum())
     total_trades = buy_entries + sell_entries
     
     # Position statistics
@@ -420,12 +425,18 @@ def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg,
     hit_ema = _hit_rate(strat_ret_ema.reindex(idx_common), sig_ema["returns"].reindex(idx_common))
     
     # Contar trades
-    buy_entries_meta = int((sig_meta['position'].reindex(idx_common).diff() == 1).sum())
-    sell_entries_meta = int((sig_meta['position'].reindex(idx_common).diff() == -1).sum())
+    # Meta-Estratégia
+    pos_meta = sig_meta['position'].reindex(idx_common)
+    prev_pos_meta = pos_meta.shift(1).fillna(0)
+    buy_entries_meta = int(((pos_meta == 1) & (prev_pos_meta != 1)).sum())
+    sell_entries_meta = int(((pos_meta == -1) & (prev_pos_meta != -1)).sum())
     total_trades_meta = buy_entries_meta + sell_entries_meta
     
-    buy_entries_ema = int((sig_ema['position'].reindex(idx_common).diff() == 1).sum())
-    sell_entries_ema = int((sig_ema['position'].reindex(idx_common).diff() == -1).sum())
+    # EMA-Only
+    pos_ema = sig_ema['position'].reindex(idx_common)
+    prev_pos_ema = pos_ema.shift(1).fillna(0)
+    buy_entries_ema = int(((pos_ema == 1) & (prev_pos_ema != 1)).sum())
+    sell_entries_ema = int(((pos_ema == -1) & (prev_pos_ema != -1)).sum())
     total_trades_ema = buy_entries_ema + sell_entries_ema
     
     # Print comparação
@@ -581,8 +592,10 @@ def run() -> None:
     print(f"  Min:   {sig['zscore'].min():.2f}")
     print(f"  Max:   {sig['zscore'].max():.2f}")
     print(f"\nPosições:")
-    buy_entries = int((sig['position'].diff() == 1).sum())
-    sell_entries = int((sig['position'].diff() == -1).sum())
+    pos = sig['position']
+    prev_pos = pos.shift(1).fillna(0)
+    buy_entries = int(((pos == 1) & (prev_pos != 1)).sum())
+    sell_entries = int(((pos == -1) & (prev_pos != -1)).sum())
     days_long = int((sig['position'] == 1).sum())
     days_short = int((sig['position'] == -1).sum())
     print(f"  Entradas de COMPRA: {buy_entries}")
