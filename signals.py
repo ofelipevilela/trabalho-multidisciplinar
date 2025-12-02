@@ -365,3 +365,170 @@ def build_ema_only_signals(prices: pd.Series, ema_fast: int = 7, ema_slow: int =
     )
     
     return df
+
+
+def build_oracle_signals(prices: pd.Series, cfg: SignalConfig = SignalConfig()) -> pd.DataFrame:
+    """
+    Estratégia 'Oracle' (Best Possible):
+    Substitui a volatilidade prevista (GARCH/Heston) pela Volatilidade Realizada FUTURA (Oracle).
+    
+    A ideia é: "E se soubéssemos exatamente qual seria a volatilidade dos próximos dias?"
+    
+    Usa a mesma lógica da Meta-Estratégia, mas:
+    - vol_forecast_final = Volatilidade Realizada Futura (21 dias à frente)
+    """
+    idx = prices.index
+    p = prices.copy()
+    p.name = "price"
+    ret = p.pct_change()
+    ret.name = "returns"
+    
+    # Alinhar
+    idx, (p, ret) = _align_series(p, ret)
+    
+    # ============ 1. ENGENHARIA DE FEATURES ============
+    
+    # Volatilidade Realizada Passada (Benchmark)
+    vol_realized_21d = ret.rolling(window=21, min_periods=21).std() * np.sqrt(252)
+    vol_benchmark = vol_realized_21d.rolling(window=7, min_periods=7).mean()
+    vol_benchmark.name = "vol_benchmark"
+    
+    # Volatilidade Oracle (Futura)
+    # Olhamos 21 dias para frente para saber a "Real Volatility" que vai acontecer
+    # Shift negativo traz dados do futuro para o presente
+    vol_oracle = ret.rolling(window=21, min_periods=21).std().shift(-21) * np.sqrt(252)
+    vol_oracle.name = "vol_oracle"
+    
+    # Preencher NaNs do fim (sem futuro) com a última vol conhecida ou 0
+    vol_oracle = vol_oracle.fillna(method='ffill').fillna(0)
+    
+    # Usamos o Oracle como o "Forecast Final"
+    vol_forecast_final = vol_oracle
+    vol_forecast_final.name = "vol_forecast_final"
+    
+    # Z-Score (apenas para manter estrutura, usando Oracle)
+    vol_stddev = vol_realized_21d.rolling(window=7, min_periods=7).std()
+    min_stddev = vol_stddev.quantile(0.1)
+    if pd.isna(min_stddev) or min_stddev <= 0: min_stddev = 0.005
+    else: min_stddev = max(min_stddev, 0.005)
+    
+    z = (vol_forecast_final - vol_benchmark) / vol_stddev.clip(lower=min_stddev)
+    z = z.replace([np.inf, -np.inf], np.nan).clip(lower=-10.0, upper=10.0)
+    z.name = "zscore"
+
+    # ============ 2. EMAs E ANÁLISE DE TENDÊNCIA ============
+    ema_fast = _ema(p, cfg.ema_fast)
+    ema_fast.name = f"ema{cfg.ema_fast}"
+    ema_slow = _ema(p, cfg.ema_slow)
+    ema_slow.name = f"ema{cfg.ema_slow}"
+    
+    trend_up = ema_fast > ema_slow
+    trend_down = ema_fast < ema_slow
+    trend_up.name = "trend_up"
+    trend_down.name = "trend_down"
+    
+    trend_up_prev = trend_up.shift(1).fillna(False)
+    trend_down_prev = trend_down.shift(1).fillna(False)
+    
+    ema_cross_up = trend_up & (~trend_up_prev)
+    ema_cross_up.name = "ema_cross_up"
+    ema_cross_down = trend_down & (~trend_down_prev)
+    ema_cross_down.name = "ema_cross_down"
+    
+    ema_fast_slope = (ema_fast.diff() / p.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    ema_fast_slope.name = "ema_fast_slope"
+    ema_slow_slope = (ema_slow.diff() / p.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    ema_slow_slope.name = "ema_slow_slope"
+    
+    # ============ 3. LÓGICA DE ENTRADA PIVOTADA ============
+    
+    # COMPRA (Long Simple + Reversão)
+    strong_reversal_up = (ema_fast_slope > cfg.ema_slope_threshold_up) & (ema_slow_slope > 0)
+    buy_signal = ema_cross_up | strong_reversal_up
+    buy_signal.name = "buy_signal"
+    
+    # VENDA (Short Sniper com ORACLE)
+    # Se sabemos que a Volatilidade FUTURA será alta, vendemos.
+    vol_condition = vol_forecast_final > (vol_benchmark * (1 + cfg.vol_buffer))
+    slope_condition = ema_fast_slope < cfg.ema_slope_threshold
+    
+    sell_signal = vol_condition & slope_condition
+    sell_signal.name = "sell_signal"
+    
+    buy_gate = pd.Series(True, index=idx, name="buy_gate")
+    sell_gate = vol_condition
+    sell_gate.name = "sell_gate"
+
+    # ============ 4. LÓGICA DE SAÍDA ============
+    position = pd.Series(0, index=idx, dtype=int, name="position")
+    
+    for i in range(1, len(idx)):
+        prev_pos = position.iat[i - 1]
+        
+        is_trend_down = trend_down.iat[i]
+        is_trend_up = trend_up.iat[i]
+        current_vol = vol_forecast_final.iat[i]
+        current_bench = vol_benchmark.iat[i] if not pd.isna(vol_benchmark.iat[i]) else 0
+        current_fast_slope = ema_fast_slope.iat[i] if not pd.isna(ema_fast_slope.iat[i]) else 0
+        
+        curr_pos = prev_pos
+        
+        if curr_pos == 1:
+            if is_trend_down:
+                curr_pos = 0
+            else:
+                curr_pos = 1
+                
+        elif curr_pos == -1:
+            # Exit Short (Panic Exit)
+            panic_over = current_vol < current_bench
+            v_shape_reversal = current_fast_slope > cfg.ema_slope_threshold_up
+            
+            if is_trend_up or panic_over or v_shape_reversal:
+                curr_pos = 0
+            else:
+                curr_pos = -1
+        
+        if curr_pos == 0:
+            if buy_signal.iat[i]:
+                curr_pos = 1
+            elif sell_signal.iat[i]:
+                curr_pos = -1
+            else:
+                curr_pos = 0
+        
+        position.iat[i] = curr_pos
+
+    # ============ 5. ASSEMBLE DATAFRAME ============
+    risk_state = pd.Series("Neutral", index=idx)
+    
+    df = pd.concat(
+        [
+            p,
+            ret,
+            ema_fast,
+            ema_slow,
+            ema_fast_slope,
+            ema_slow_slope,
+            vol_benchmark,
+            vol_forecast_final, # Oracle Vol
+            z,
+            risk_state,
+            buy_gate,
+            sell_gate,
+            trend_up,
+            trend_down,
+            ema_cross_up,
+            ema_cross_down,
+            buy_signal,
+            sell_signal,
+            position,
+        ],
+        axis=1,
+    )
+
+    warmup_mask = vol_benchmark.isna() | ema_fast.isna() | ema_slow.isna()
+    df.loc[warmup_mask, "position"] = 0
+    df["position"] = df["position"].astype(int)
+
+    return df

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # local modules (root-level)
 from model_heston import estimate_heston_vol
 from model_garch import estimate_garch_vol
-from signals import SignalConfig, build_signals, build_ema_only_signals
+from signals import SignalConfig, build_signals, build_ema_only_signals, build_oracle_signals
 
 
 # ========= USER CONFIG (edit here) =========
@@ -199,6 +199,9 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.3, linestyle="--")
     plt.tight_layout()
+    ax.grid(True, alpha=0.3, linestyle="--")
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_price_emas.png")
     plt.show()
 
     # 2️⃣ VOLATILITIES
@@ -213,6 +216,8 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.title(f"{ticker} — Predicted vs Realized Volatility")
     plt.legend()
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_volatilities.png")
     plt.show()
 
     # 3️⃣ Z-SCORE (Meta-Estratégia Assimétrica 2.0)
@@ -246,6 +251,8 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.legend(loc="best", fontsize=8)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_zscore.png")
     plt.show()
 
     # 4️⃣ EQUITY & DRAWDOWN
@@ -255,6 +262,8 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax[1].plot(sig.index, dd, color="red")
     ax[1].set_title("Drawdown")
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_equity.png")
     plt.show()
 
     # 5️⃣ HISTOGRAM
@@ -262,6 +271,8 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.hist(strat_ret.dropna(), bins=40, alpha=0.7)
     plt.title(f"{ticker} — Strategy Daily Returns Distribution")
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_histogram.png")
     plt.show()
 
 
@@ -372,6 +383,8 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.3, linestyle="--")
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_ema_only_price.png")
     plt.show()
 
     # 2️⃣ EQUITY & DRAWDOWN
@@ -381,6 +394,8 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax[1].plot(sig.index, dd, color="red")
     ax[1].set_title("Drawdown")
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_ema_only_equity.png")
     plt.show()
 
     # 3️⃣ HISTOGRAM
@@ -388,12 +403,14 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.hist(strat_ret.dropna(), bins=40, alpha=0.7)
     plt.title(f"{ticker} — EMA-Only Daily Returns Distribution")
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_ema_only_histogram.png")
     plt.show()
 
 
-def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg, ticker: str) -> None:
+def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, sig_oracle: pd.DataFrame, cfg, ticker: str) -> None:
     """
-    Compara a meta-estratégia (com modelo de volatilidade) vs estratégia apenas com EMAs.
+    Compara a meta-estratégia vs EMA-Only vs Oracle.
     """
     import matplotlib.pyplot as plt
     import numpy as np
@@ -406,11 +423,16 @@ def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg,
     strat_ret_ema = _strategy_returns(sig_ema)
     equity_ema = _equity_curve(strat_ret_ema)
     dd_ema = _drawdown(equity_ema)
+
+    strat_ret_oracle = _strategy_returns(sig_oracle)
+    equity_oracle = _equity_curve(strat_ret_oracle)
+    dd_oracle = _drawdown(equity_oracle)
     
     # Alinhar índices
-    idx_common = equity_meta.index.intersection(equity_ema.index)
+    idx_common = equity_meta.index.intersection(equity_ema.index).intersection(equity_oracle.index)
     equity_meta = equity_meta.reindex(idx_common)
     equity_ema = equity_ema.reindex(idx_common)
+    equity_oracle = equity_oracle.reindex(idx_common)
     dd_meta = dd_meta.reindex(idx_common)
     dd_ema = dd_ema.reindex(idx_common)
     
@@ -486,11 +508,15 @@ def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg,
     ax1.grid(True, alpha=0.3, linestyle="--")
     
     # 2) Equity curves comparison
+    total_return_oracle = equity_oracle.iloc[-1] - 1.0
+    
     ax2 = axes[1]
     ax2.plot(idx_common, equity_meta, label=f"Meta-Estratégia (Return: {total_return_meta:.2%})", 
              lw=2, color="blue", alpha=0.8)
     ax2.plot(idx_common, equity_ema, label=f"EMA-Only (Return: {total_return_ema:.2%})", 
              lw=2, color="orange", alpha=0.8)
+    ax2.plot(idx_common, equity_oracle, label=f"Oracle (Return: {total_return_oracle:.2%})", 
+             lw=2, color="purple", alpha=0.8, linestyle="--")
     ax2.axhline(1.0, color="gray", linestyle="--", linewidth=0.5, alpha=0.5)
     ax2.set_title("Equity Curves Comparison", fontsize=11, pad=10)
     ax2.set_ylabel("Cumulative Return")
@@ -508,6 +534,142 @@ def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, cfg,
     ax3.grid(True, alpha=0.3, linestyle="--")
     
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_comparison_ema.png")
+    plt.show()
+
+def visualize_oracle_comparison(sig_meta: pd.DataFrame, sig_oracle: pd.DataFrame, cfg, ticker: str) -> None:
+    """
+    Compara a meta-estratégia (com modelo de volatilidade) vs ORACLE (Volatilidade Realizada Futura).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Calcular retornos e equity para ambas estratégias
+    strat_ret_meta = _strategy_returns(sig_meta)
+    equity_meta = _equity_curve(strat_ret_meta)
+    dd_meta = _drawdown(equity_meta)
+    
+    strat_ret_oracle = _strategy_returns(sig_oracle)
+    equity_oracle = _equity_curve(strat_ret_oracle)
+    dd_oracle = _drawdown(equity_oracle)
+    
+    # Alinhar índices
+    idx_common = equity_meta.index.intersection(equity_oracle.index)
+    equity_meta = equity_meta.reindex(idx_common)
+    equity_oracle = equity_oracle.reindex(idx_common)
+    dd_meta = dd_meta.reindex(idx_common)
+    dd_oracle = dd_oracle.reindex(idx_common)
+    
+    # Métricas para comparação
+    total_return_meta = equity_meta.iloc[-1] - 1.0
+    total_return_oracle = equity_oracle.iloc[-1] - 1.0
+    cagr_meta = (equity_meta.iloc[-1] ** (252 / max(1, len(idx_common)))) - 1.0
+    cagr_oracle = (equity_oracle.iloc[-1] ** (252 / max(1, len(idx_common)))) - 1.0
+    sharpe_meta = (strat_ret_meta.reindex(idx_common).mean() / strat_ret_meta.reindex(idx_common).std()) * np.sqrt(252) if strat_ret_meta.reindex(idx_common).std() > 0 else np.nan
+    sharpe_oracle = (strat_ret_oracle.reindex(idx_common).mean() / strat_ret_oracle.reindex(idx_common).std()) * np.sqrt(252) if strat_ret_oracle.reindex(idx_common).std() > 0 else np.nan
+    hit_meta = _hit_rate(strat_ret_meta.reindex(idx_common), sig_meta["returns"].reindex(idx_common))
+    hit_oracle = _hit_rate(strat_ret_oracle.reindex(idx_common), sig_oracle["returns"].reindex(idx_common))
+    
+    # Contar trades
+    # Meta-Estratégia
+    pos_meta = sig_meta['position'].reindex(idx_common)
+    prev_pos_meta = pos_meta.shift(1).fillna(0)
+    buy_entries_meta = int(((pos_meta == 1) & (prev_pos_meta != 1)).sum())
+    sell_entries_meta = int(((pos_meta == -1) & (prev_pos_meta != -1)).sum())
+    total_trades_meta = buy_entries_meta + sell_entries_meta
+    
+    # Oracle
+    pos_oracle = sig_oracle['position'].reindex(idx_common)
+    prev_pos_oracle = pos_oracle.shift(1).fillna(0)
+    buy_entries_oracle = int(((pos_oracle == 1) & (prev_pos_oracle != 1)).sum())
+    sell_entries_oracle = int(((pos_oracle == -1) & (prev_pos_oracle != -1)).sum())
+    total_trades_oracle = buy_entries_oracle + sell_entries_oracle
+    
+    # Print comparação
+    report = []
+    report.append("\n" + "=" * 80)
+    report.append("COMPARAÇÃO: META-ESTRATÉGIA vs ORACLE (BEST POSSIBLE)")
+    report.append("=" * 80)
+    report.append(f"{'Métrica':<30} {'Meta-Estratégia':<20} {'Oracle':<20} {'Diferença':<15}")
+    report.append("-" * 80)
+    report.append(f"{'Total Return':<30} {total_return_meta:>18.2%} {total_return_oracle:>18.2%} {(total_return_meta - total_return_oracle):>13.2%}")
+    report.append(f"{'CAGR (approx)':<30} {cagr_meta:>18.2%} {cagr_oracle:>18.2%} {(cagr_meta - cagr_oracle):>13.2%}")
+    report.append(f"{'Sharpe Ratio':<30} {sharpe_meta:>18.2f} {sharpe_oracle:>18.2f} {(sharpe_meta - sharpe_oracle):>13.2f}")
+    report.append(f"{'Hit Rate':<30} {hit_meta:>18.2%} {hit_oracle:>18.2%} {(hit_meta - hit_oracle):>13.2%}")
+    report.append(f"{'Total Trades':<30} {total_trades_meta:>18d} {total_trades_oracle:>18d} {(total_trades_meta - total_trades_oracle):>13d}")
+    report.append(f"{'Buy Entries':<30} {buy_entries_meta:>18d} {buy_entries_oracle:>18d} {(buy_entries_meta - buy_entries_oracle):>13d}")
+    report.append(f"{'Sell Entries':<30} {sell_entries_meta:>18d} {sell_entries_oracle:>18d} {(sell_entries_meta - sell_entries_oracle):>13d}")
+    report.append("=" * 80)
+
+    if total_return_oracle < total_return_meta:
+        report.append("\n⚠️  WARNING: Oracle strategy performed WORSE than Meta Strategy!")
+        report.append("    This might happen due to specific market conditions or thresholds,")
+        report.append("    but generally Oracle should be better. Check volatility alignment.")
+    else:
+        report.append("\n✅  Oracle strategy performed BETTER (or equal) as expected.")
+    
+    print("\n".join(report))
+    
+    with open("outputs/comparison_oracle.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(report))
+    
+    # Gráfico comparativo
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    
+    # 1) Price + EMAs com posições
+    ax1 = axes[0]
+    ax1.plot(sig_meta.index, sig_meta["price"], label="Price", lw=1.5, color="black", zorder=5)
+    ax1.plot(sig_meta.index, sig_meta[f"ema{cfg.ema_fast}"], label=f"EMA {cfg.ema_fast}", lw=1.2, alpha=0.8)
+    ax1.plot(sig_meta.index, sig_meta[f"ema{cfg.ema_slow}"], label=f"EMA {cfg.ema_slow}", lw=1.2, alpha=0.8)
+    
+    # Shade positions for meta-strategy
+    long_mask_meta = sig_meta["position"] == 1
+    short_mask_meta = sig_meta["position"] == -1
+    ax1.fill_between(sig_meta.index, sig_meta["price"].min(), sig_meta["price"].max(),
+                     where=long_mask_meta, color="green", alpha=0.15, label="Meta: Long", zorder=1)
+    ax1.fill_between(sig_meta.index, sig_meta["price"].min(), sig_meta["price"].max(),
+                     where=short_mask_meta, color="red", alpha=0.15, label="Meta: Short", zorder=1)
+    
+    # Shade positions for Oracle strategy (lighter)
+    long_mask_oracle = sig_oracle["position"] == 1
+    short_mask_oracle = sig_oracle["position"] == -1
+    ax1.fill_between(sig_oracle.index, sig_oracle["price"].min(), sig_oracle["price"].max(),
+                     where=long_mask_oracle, color="cyan", alpha=0.08, label="Oracle: Long", zorder=0)
+    ax1.fill_between(sig_oracle.index, sig_oracle["price"].min(), sig_oracle["price"].max(),
+                     where=short_mask_oracle, color="magenta", alpha=0.08, label="Oracle: Short", zorder=0)
+    
+    ax1.set_title(f"{ticker} — Price & EMAs: Meta-Estratégia (verde/vermelho) vs Oracle (ciano/magenta)", 
+                  fontsize=11, pad=10)
+    ax1.set_ylabel("Price")
+    ax1.legend(loc="best", fontsize=8, ncol=2)
+    ax1.grid(True, alpha=0.3, linestyle="--")
+    
+    # 2) Equity curves comparison
+    ax2 = axes[1]
+    ax2.plot(idx_common, equity_meta, label=f"Meta-Estratégia (Return: {total_return_meta:.2%})", 
+             lw=2, color="blue", alpha=0.8)
+    ax2.plot(idx_common, equity_oracle, label=f"Oracle (Return: {total_return_oracle:.2%})", 
+             lw=2, color="purple", alpha=0.8)
+    ax2.axhline(1.0, color="gray", linestyle="--", linewidth=0.5, alpha=0.5)
+    ax2.set_title("Equity Curves Comparison (Meta vs Oracle)", fontsize=11, pad=10)
+    ax2.set_ylabel("Cumulative Return")
+    ax2.legend(loc="best", fontsize=9)
+    ax2.grid(True, alpha=0.3, linestyle="--")
+    
+    # 3) Drawdown comparison
+    ax3 = axes[2]
+    ax3.fill_between(idx_common, dd_meta, 0, alpha=0.5, color="blue", label="Meta-Estratégia Drawdown")
+    ax3.fill_between(idx_common, dd_oracle, 0, alpha=0.5, color="purple", label="Oracle Drawdown")
+    ax3.set_title("Drawdown Comparison", fontsize=11, pad=10)
+    ax3.set_ylabel("Drawdown")
+    ax3.set_xlabel("Date")
+    ax3.legend(loc="best", fontsize=9)
+    ax3.grid(True, alpha=0.3, linestyle="--")
+    
+    plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig(f"outputs/plots/{ticker}_comparison_oracle.png")
     plt.show()
 
 def run() -> None:
@@ -635,11 +797,24 @@ def run() -> None:
     print("=" * 60)
     visualize(sig, cfg, TICKER)
     
-    # 9) Comparison visualization
+    # 9) Oracle Strategy (Moved up)
     print("\n" + "=" * 60)
-    print("Gerando comparação: Meta-Estratégia vs EMA-Only...")
+    print("Construindo estratégia ORACLE (Best Possible)...")
     print("=" * 60)
-    visualize_ema_comparison(sig, sig_ema_only, cfg, TICKER)
+    sig_oracle = build_oracle_signals(prices, cfg=cfg)
+    print(f"  ✓ {len(sig_oracle)} sinais gerados (Oracle)")
+
+    # 10) Comparison visualization
+    print("\n" + "=" * 60)
+    print("Gerando comparação: Meta-Estratégia vs EMA-Only vs Oracle...")
+    print("=" * 60)
+    visualize_ema_comparison(sig, sig_ema_only, sig_oracle, cfg, TICKER)
+    
+    print("\n" + "=" * 60)
+    print("Gerando comparação detalhada: Meta-Estratégia vs ORACLE...")
+    print("=" * 60)
+    visualize_oracle_comparison(sig, sig_oracle, cfg, TICKER)
     
 if __name__ == "__main__":
     run()
+

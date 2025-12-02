@@ -1,0 +1,22 @@
+# User requested
+outputs/
+venv/
+signals.csv
+
+# Python standard
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs and debug
+*.log
+debug_inputs.txt
+output.txt
