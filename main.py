@@ -94,6 +94,10 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     """
     import matplotlib.pyplot as plt
     import numpy as np
+    
+    # Ensure output directory exists
+    Path("outputs/plots").mkdir(parents=True, exist_ok=True)
+    safe_ticker = ticker.replace("^", "").replace("/", "-")
 
     # --- metrics prep ---
     strat_ret = _strategy_returns(sig)
@@ -201,7 +205,7 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.tight_layout()
     ax.grid(True, alpha=0.3, linestyle="--")
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_price_emas.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_price_emas.png")
     plt.show()
 
     # 2️⃣ VOLATILITIES
@@ -217,7 +221,7 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.legend()
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_volatilities.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_volatilities.png")
     plt.show()
 
     # 3️⃣ Z-SCORE (Meta-Estratégia Assimétrica 2.0)
@@ -252,7 +256,7 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_zscore.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_zscore.png")
     plt.show()
 
     # 4️⃣ EQUITY & DRAWDOWN
@@ -263,7 +267,7 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax[1].set_title("Drawdown")
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_equity.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_equity.png")
     plt.show()
 
     # 5️⃣ HISTOGRAM
@@ -272,7 +276,7 @@ def visualize(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.title(f"{ticker} — Strategy Daily Returns Distribution")
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_histogram.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_histogram.png")
     plt.show()
 
 
@@ -282,6 +286,10 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     """
     import matplotlib.pyplot as plt
     import numpy as np
+
+    # Ensure output directory exists
+    Path("outputs/plots").mkdir(parents=True, exist_ok=True)
+    safe_ticker = ticker.replace("^", "").replace("/", "-")
 
     # --- metrics prep ---
     strat_ret = _strategy_returns(sig)
@@ -384,7 +392,7 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax.grid(True, alpha=0.3, linestyle="--")
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_ema_only_price.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_ema_only_price.png")
     plt.show()
 
     # 2️⃣ EQUITY & DRAWDOWN
@@ -395,7 +403,7 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     ax[1].set_title("Drawdown")
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_ema_only_equity.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_ema_only_equity.png")
     plt.show()
 
     # 3️⃣ HISTOGRAM
@@ -404,7 +412,7 @@ def visualize_ema_only(sig: pd.DataFrame, cfg, ticker: str) -> None:
     plt.title(f"{ticker} — EMA-Only Daily Returns Distribution")
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_ema_only_histogram.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_ema_only_histogram.png")
     plt.show()
 
 
@@ -414,6 +422,10 @@ def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, sig_
     """
     import matplotlib.pyplot as plt
     import numpy as np
+
+    # Ensure output directory exists
+    Path("outputs/plots").mkdir(parents=True, exist_ok=True)
+    safe_ticker = ticker.replace("^", "").replace("/", "-")
     
     # Calcular retornos e equity para ambas estratégias
     strat_ret_meta = _strategy_returns(sig_meta)
@@ -535,7 +547,7 @@ def visualize_ema_comparison(sig_meta: pd.DataFrame, sig_ema: pd.DataFrame, sig_
     
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_comparison_ema.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_comparison_ema.png")
     plt.show()
 
 def visualize_oracle_comparison(sig_meta: pd.DataFrame, sig_oracle: pd.DataFrame, cfg, ticker: str) -> None:
@@ -544,6 +556,10 @@ def visualize_oracle_comparison(sig_meta: pd.DataFrame, sig_oracle: pd.DataFrame
     """
     import matplotlib.pyplot as plt
     import numpy as np
+
+    # Ensure output directory exists
+    Path("outputs/plots").mkdir(parents=True, exist_ok=True)
+    safe_ticker = ticker.replace("^", "").replace("/", "-")
     
     # Calcular retornos e equity para ambas estratégias
     strat_ret_meta = _strategy_returns(sig_meta)
@@ -669,7 +685,7 @@ def visualize_oracle_comparison(sig_meta: pd.DataFrame, sig_oracle: pd.DataFrame
     
     plt.tight_layout()
     plt.tight_layout()
-    plt.savefig(f"outputs/plots/{ticker}_comparison_oracle.png")
+    plt.savefig(f"outputs/plots/{safe_ticker}_comparison_oracle.png")
     plt.show()
 
 def run() -> None:
