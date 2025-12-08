@@ -1,6 +1,7 @@
 # evolution_analysis.py
 
 from __future__ import annotations
+print("DEBUG: Script starting...")
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -52,38 +53,39 @@ def run_evolution_analysis():
     print("  → Nível 1: EMA Only...")
     sig_lvl1 = build_ema_only_signals(prices, ema_fast=cfg.ema_fast, ema_slow=cfg.ema_slow)
     
-    # Preparação Explícita de Inputs para Nível 2 e 4
-    print("\n  [DEBUG] Preparando inputs para Nível 2 e 4...")
-    # Nível 2: Shift(1) -> Vol de Ontem
+    # Preparação dos Inputs para Estratégia Unificada (Z-Score)
+    print("\n  [DEBUG] Preparando inputs para Estratégia Unificada (Z-Score)...")
+    
+    # Nível 2: Input = Volatilidade Passada (Média Móvel 21d)
+    # Lógica: O modelo "acha" que a vol futura será igual à passada.
     vol_input_lvl2 = vol_realized_21d.shift(1).fillna(method='bfill')
     
-    # Nível 4: Shift(-1) -> Vol de Amanhã
-    vol_input_lvl4 = vol_realized_21d.shift(-1).fillna(method='ffill')
+    # Nível 4: Input = Volatilidade Futura Real (Oráculo)
+    # Lógica: O modelo "sabe" exatamente a vol dos próximos 5 dias.
+    vol_future_pure = returns.rolling(window=5).std() * np.sqrt(252)
+    vol_input_lvl4 = vol_future_pure.shift(-5).fillna(method='ffill')
     
-    # Sanity Check - Dump to file
+    # Sanity Check
     with open("debug_inputs.txt", "w") as f:
-        f.write("SANITY CHECK INPUTS\n")
+        f.write("SANITY CHECK INPUTS (UNIFIED Z-SCORE)\n")
         f.write("="*40 + "\n")
-        f.write(f"Lvl2 (Retrovisor) Head:\n{vol_input_lvl2.head(10).to_string()}\n\n")
-        f.write(f"Lvl4 (Oráculo) Head:\n{vol_input_lvl4.head(10).to_string()}\n\n")
-        f.write(f"Are they equal? {vol_input_lvl2.equals(vol_input_lvl4)}\n")
+        f.write(f"Lvl2 (Past Vol) Head:\n{vol_input_lvl2.head(10).to_string()}\n\n")
+        f.write(f"Lvl4 (Future Vol) Head:\n{vol_input_lvl4.head(10).to_string()}\n\n")
         f.write(f"Correlation: {vol_input_lvl2.corr(vol_input_lvl4)}\n")
-        
-    if vol_input_lvl2.equals(vol_input_lvl4):
-        print("  [ERRO CRÍTICO] Inputs do Nível 2 e 4 são IDÊNTICOS! Verifique a lógica de shift.")
-    else:
-        print("  [OK] Inputs são diferentes.")
 
-    # Nível 2: EMA + Volatilidade Padrão (Retrovisor)
-    print("  → Nível 2: Retrovisor (Vol Histórica)...")
+    # Execução das Estratégias (Todas usam build_signals = Z-Score Strategy)
+    
+    # Nível 2: Z-Score com Vol Passada
+    print("  → Nível 2: Z-Score (Vol Passada)...")
+    # Passamos a mesma vol para garch e heston para simular "consenso" dessa fonte
     sig_lvl2 = build_signals(prices, garch_vol=vol_input_lvl2, heston_vol=vol_input_lvl2, cfg=cfg)
     
-    # Nível 3: Meta-Estratégia (Nosso Modelo)
-    print("  → Nível 3: Meta-Estratégia (Heston + GARCH)...")
+    # Nível 3: Z-Score com Modelos (Heston + GARCH) - O Original
+    print("  → Nível 3: Z-Score (Heston + GARCH)...")
     sig_lvl3 = build_signals(prices, garch_vol=garch_vol, heston_vol=heston_vol, cfg=cfg)
     
-    # Nível 4: Oráculo (Limite Teórico)
-    print("  → Nível 4: Oráculo (Vol Futura)...")
+    # Nível 4: Z-Score com Vol Futura (Oráculo)
+    print("  → Nível 4: Z-Score (Vol Futura)...")
     sig_lvl4 = build_signals(prices, garch_vol=vol_input_lvl4, heston_vol=vol_input_lvl4, cfg=cfg)
     
     # 3. Cálculo de Performance
@@ -92,9 +94,9 @@ def run_evolution_analysis():
     results = {}
     scenarios = [
         ("Nível 1 (EMA Only)", sig_lvl1, "gray", ":", 1.5),
-        ("Nível 2 (Retrovisor)", sig_lvl2, "skyblue", "-", 1.5),
-        ("Nível 3 (Meta-Estratégia)", sig_lvl3, "teal", "-", 2.5), # Destaque
-        ("Nível 4 (Oráculo)", sig_lvl4, "gold", "--", 1.5)
+        ("Nível 2 (Z-Score Vol Passada)", sig_lvl2, "skyblue", "-", 1.5),
+        ("Nível 3 (Z-Score Heston/GARCH)", sig_lvl3, "teal", "-", 2.5), # Destaque
+        ("Nível 4 (Z-Score Vol Futura)", sig_lvl4, "gold", "--", 1.5)
     ]
     
     metrics_data = []
@@ -106,7 +108,6 @@ def run_evolution_analysis():
         equity = _equity_curve(strat_ret)
         
         # Alinhar equity para começar em 1.0 no mesmo ponto (interseção comum)
-        # Como todas usam os mesmos dados base alinhados, já devem estar ok, mas garantindo:
         equity = equity.reindex(idx).fillna(method='ffill').fillna(1.0)
         equity = equity / equity.iloc[0] # Normalizar base 1.0
         
@@ -114,18 +115,25 @@ def run_evolution_analysis():
         sharpe = (strat_ret.mean() / strat_ret.std()) * np.sqrt(252) if strat_ret.std() > 0 else 0
         dd = _drawdown(equity).min()
         
+        # Contagem de Trades
+        pos = sig['position']
+        prev_pos = pos.shift(1).fillna(0)
+        trades = int(((pos != prev_pos) & (pos != 0)).sum()) # Entradas ou reversões
+        
         results[name] = {
             "Total Return": total_ret,
             "Sharpe": sharpe,
             "Max DD": dd,
-            "Equity": equity
+            "Equity": equity,
+            "Trades": trades
         }
         
         metrics_data.append({
             "Nível": name,
             "Sharpe": f"{sharpe:.2f}",
             "Retorno Total": f"{total_ret:.2%}",
-            "Max Drawdown": f"{dd:.2%}"
+            "Max Drawdown": f"{dd:.2%}",
+            "Trades": trades
         })
         
         plt.plot(equity.index, equity, label=f"{name} (Sharpe: {sharpe:.2f})", color=color, linestyle=style, linewidth=lw)
@@ -150,7 +158,7 @@ def run_evolution_analysis():
     # plt.show() # Não mostrar interativamente para não bloquear script se rodado em background
     
     # Relatório Final
-    report_path = outdir / "evolution_report.txt"
+    report_path = outdir / "evolution_report_v2.txt"
     with open(report_path, "w", encoding="utf-8") as f:
         f.write("=" * 80 + "\n")
         f.write("TABELA DE PERFORMANCE COMPARATIVA\n")
@@ -160,8 +168,8 @@ def run_evolution_analysis():
         f.write("-" * 80 + "\n")
         
         # Atribuição de Valor
-        sharpe_lvl2 = results["Nível 2 (Retrovisor)"]["Sharpe"]
-        sharpe_lvl3 = results["Nível 3 (Meta-Estratégia)"]["Sharpe"]
+        sharpe_lvl2 = results["Nível 2 (Z-Score Vol Passada)"]["Sharpe"]
+        sharpe_lvl3 = results["Nível 3 (Z-Score Heston/GARCH)"]["Sharpe"]
         
         if sharpe_lvl2 > 0:
             gain_pct = ((sharpe_lvl3 - sharpe_lvl2) / sharpe_lvl2) * 100
