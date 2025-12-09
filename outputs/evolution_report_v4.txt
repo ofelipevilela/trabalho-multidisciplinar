@@ -2,13 +2,13 @@
 TABELA DE PERFORMANCE COMPARATIVA
 ================================================================================
                          Nível Sharpe Retorno Total Max Drawdown  Trades
-            Nível 1 (EMA Only)   0.22        20.55%      -25.92%      79
- Nível 2 (Z-Score Vol Passada)   0.49        77.81%      -24.65%     151
-Nível 3 (Z-Score Heston/GARCH)   0.59        99.85%      -22.85%     136
-  Nível 4 (Z-Score Vol Futura)   0.49        77.81%      -24.65%     151
+            Nível 1 (EMA Only)   0.22        21.03%      -25.92%      79
+ Nível 2 (Z-Score Vol Passada)   0.49        82.45%      -22.07%     130
+Nível 3 (Z-Score Heston/GARCH)   0.55        89.89%      -21.31%     143
+  Nível 4 (Z-Score Vol Futura)   0.49        82.45%      -22.07%     130
 --------------------------------------------------------------------------------
 
 ATRIBUIÇÃO DE VALOR (Previsão Matemática):
-Ganho de Sharpe do Nível 3 sobre o Nível 2: +22.0%
+Ganho de Sharpe do Nível 3 sobre o Nível 2: +12.2%
 Isso representa o valor adicionado por usar modelos Heston/GARCH vs Volatilidade Passada.
 ================================================================================

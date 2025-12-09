@@ -24,6 +24,7 @@ class SignalConfig:
     
     # Novo parâmetro para Reversão (Long)
     ema_slope_threshold_up: float = 0.0005 # Inclinação positiva forte para reversão
+    panic_z_factor: float = 3.0            # Fator multiplicador para override de pânico
 
     def __post_init__(self):
         if object.__getattribute__(self, "z_thresholds") is None:
@@ -94,6 +95,9 @@ def build_signals(
     """
     # 0) Align inputs and squeeze to Series
     idx, (p_in, gv_in, hv_in) = _align_series(prices, garch_vol, heston_vol)
+    
+
+
     p = _as_series(p_in, "price")
     gv_in = _as_series(gv_in, "garch_vol")
     hv_in = _as_series(hv_in, "heston_vol")
@@ -151,6 +155,7 @@ def build_signals(
     
     vol_stddev_safe = vol_stddev.clip(lower=min_stddev)
     z = (vol_forecast_final - vol_benchmark) / vol_stddev_safe
+    
     z = z.replace([np.inf, -np.inf], np.nan).clip(lower=-10.0, upper=10.0)
     z.name = "zscore"
     
@@ -201,16 +206,26 @@ def build_signals(
     buy_signal.name = "buy_signal"
     
     # --- VENDA (Short Sniper) ---
-    # Regra: (Vol > Bench * 1.05) AND (EMA_Slope < threshold)
+    # Regra: (Z-Score > Threshold do Perfil) AND (EMA_Slope < threshold)
     
-    # Condição 1: Volatilidade Alta
-    vol_condition = vol_forecast_final > (vol_benchmark * (1 + cfg.vol_buffer))
+    # Getting thresholds for current profile
+    thresholds = cfg.z_thresholds[cfg.profile]
+    sell_threshold = thresholds["sell"]
+    
+    # Condição 1: Z-Score Alto (Volatilidade anormal para o regime atual)
+    # Isso substitui o buffer fixo de 5% por uma medida estatística de "Desvios Padrão"
+    vol_condition = z > sell_threshold
     
     # Condição 2: Inclinação Negativa Acentuada
     slope_condition = ema_fast_slope < cfg.ema_slope_threshold
     
-    # Sinal de Venda
-    sell_signal = vol_condition & slope_condition
+    # Condição 3 (NOVA): Pânico Extremo (Override)
+    # Se o Z-Score for surreal (ex: > factor * threshold), vende IMEDIATAMENTE.
+    # Isso permite que o Oráculo (Level 4) venda ANTES do preço cair.
+    panic_override = z > (sell_threshold * cfg.panic_z_factor)
+    
+    # Sinal de Venda: (Vol Alta E Caindo) OU (Pânico Extremo)
+    sell_signal = (vol_condition & slope_condition) | panic_override
     sell_signal.name = "sell_signal"
     
     # Flags auxiliares para visualização
