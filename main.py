@@ -13,6 +13,11 @@ from signals import SignalConfig, build_signals, build_ema_only_signals
 # ========= USER CONFIG (edit here) =========
 TICKER = "^GSPC"         # e.g., "^GSPC", "NVDA", "AAPL", "AMD"
 START  = "2018-01-01"    # start date for historical data
+
+# --- Strategy Config ---
+PROFILE_L2 = "moderate"      # Perfil do Nível 2 (Retrovisor)
+PROFILE_L3 = "aggressive"    # Perfil do Nível 3 (Meta-Estratégia)
+PANIC_L3   = 2.5             # Panic Factor do Nível 3
 # ==========================================
 
 def load_prices_yf(ticker: str, start: str = "2005-01-01") -> pd.Series:
@@ -154,8 +159,11 @@ def run_strategy_suite():
     print("\n[2/4] Executando Estratégias (L1 a L4)...")
     
     # Configs
-    cfg_base = SignalConfig(profile="moderate") # Padrão
-    cfg_aggressive = SignalConfig(profile="aggressive", panic_z_factor=2.5) # Otimizado L3
+    # L2: Usa o PROFILE_L2 definido no topo (Default: moderate)
+    cfg_l2 = SignalConfig(profile=PROFILE_L2) 
+    
+    # L3: Usa o PROFILE_L3 e PANIC_L3 definidos no topo (Default: aggressive, 2.5)
+    cfg_l3 = SignalConfig(profile=PROFILE_L3, panic_z_factor=PANIC_L3) 
     
     # Oráculo Standard: Sem Panic Override (apenas filtro de tendência)
     # Definimos panic_factor altíssimo para garantir que ele nunca venda "em pânico",
@@ -167,12 +175,12 @@ def run_strategy_suite():
     sig_lvl1 = build_ema_only_signals(prices, ema_fast=7, ema_slow=21)
     
     # L2: Vol Passada
-    print("  Processing Level 2 (Past Vol)...")
-    sig_lvl2 = build_signals(prices, garch_vol=vol_input_lvl2, heston_vol=vol_input_lvl2, cfg=cfg_base)
+    print(f"  Processing Level 2 (Past Vol - {PROFILE_L2})...")
+    sig_lvl2 = build_signals(prices, garch_vol=vol_input_lvl2, heston_vol=vol_input_lvl2, cfg=cfg_l2)
     
     # L3: Modelos (Otimizada v6)
-    print("  Processing Level 3 (Models - Aggressive)...")
-    sig_lvl3 = build_signals(prices, garch_vol=garch_vol, heston_vol=heston_vol, cfg=cfg_aggressive)
+    print(f"  Processing Level 3 (Models - {PROFILE_L3})...")
+    sig_lvl3 = build_signals(prices, garch_vol=garch_vol, heston_vol=heston_vol, cfg=cfg_l3)
     
     # L4: Oráculo (Standard)
     print("  Processing Level 4 (Oracle Standard)...")

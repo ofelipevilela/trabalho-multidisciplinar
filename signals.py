@@ -28,7 +28,7 @@ class SignalConfig:
 
     def __post_init__(self):
         if object.__getattribute__(self, "z_thresholds") is None:
-            # Mantido para compatibilidade visual, mas lógica de venda não usa mais
+            # Padrões de Z-Score por Perfil de Risco
             object.__setattr__(
                 self,
                 "z_thresholds",
@@ -332,9 +332,9 @@ def build_ema_only_signals(prices: pd.Series, ema_fast: int = 7, ema_slow: int =
     idx = prices.index
     p = prices.copy()
     p.name = "price"
-    ret = p.pct_change().dropna()
+    ret = p.pct_change()
     ret.name = "returns"
-    idx, (p, ret) = _align_series(p, ret)
+    # idx, (p, ret) = _align_series(p, ret)  <-- Causava o desalinhamento ao remover o primeiro item
     
     ema_fast_series = _ema(p, span=ema_fast)
     ema_fast_series.name = f"ema{ema_fast}"
